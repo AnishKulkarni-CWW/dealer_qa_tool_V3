@@ -1,5 +1,4 @@
-"""
-Shared Streamlit rendering for every QA result table.
+"""Shared Streamlit rendering for every QA result table.
 
 Why the implementation lives here rather than in app.py: the same three
 shapes of result get rendered in half a dozen places (Content QA, Exact
@@ -7,26 +6,31 @@ Match QA, Styling QA, and each Advanced QA module), and they must all
 behave identically — otherwise a reviewer learns one table's rules and is
 then surprised by the next one.
 
-The behaviour every table shares:
+THE TABLE, AS REDESIGNED
+------------------------
+Every result table now renders as the reference design's tabbed record
+view:
 
-  * Fail / Warn / Missing rows are ALWAYS visible, in a full-width table
-    that wraps long text instead of truncating it. These are the only
-    rows anyone actually needs to act on, so they are never hidden behind
-    a click.
-  * Pass / Present rows are collapsed into a closed expander labelled
-    "<pass_label> (n) — click to view". They are still one click away,
-    but a run where everything passed shows a short confirmation instead
-    of two hundred green rows.
-  * An "Expand" button opens the COMPLETE table (passes included) in a
-    modal dialog with its own close button, for when someone does want to
-    read the whole thing without scrolling the page.
+    ┌ 3 issues · 1 warning · 20 passed ─────────── [↗ Expand] ┐
+    │ Issues (3) │ Warnings (1) │ Passed (20) │ All (24)      │
+    └──────────────────────────────────────────────────────────┘
+      #  STATUS   ITEM                DETAIL
+
+  * The count strip above the tabs always names the failure and warning
+    totals, so nothing that needs attention can hide behind an unopened
+    tab — you can see there is something to look at before you click.
+  * Tabs are client-side, so switching between them never re-runs the
+    script and never recomputes a QA pass.
+  * "Issues" comes first and is the tab you land on, because failures are
+    the only rows anyone has to act on.
+  * "↗ Expand" still opens the COMPLETE table in a modal for reading a
+    long run without scrolling the page.
 
 Rendering uses plain HTML tables rather than st.dataframe because a
 dataframe truncates long detail text to a single clipped line and adds
 its own inner scrollbar — which is exactly wrong for cells that routinely
-contain a full sentence explaining why a check failed. Status colours
-come from the classes defined in theme.py, so the palette lives in one
-place.
+contain a full sentence explaining why a check failed. Status colours and
+every other token come from theme.py, so the palette lives in one place.
 """
 
 from __future__ import annotations
@@ -39,8 +43,10 @@ import streamlit as st
 
 try:
     from .results import ModuleResult, PASS, FAIL, WARN
+    from . import theme as _theme
 except ImportError:  # pragma: no cover - standalone use
     from results import ModuleResult, PASS, FAIL, WARN
+    import theme as _theme
 
 
 # Status vocabulary used across the app. "Present" is Content QA's word
@@ -48,6 +54,23 @@ except ImportError:  # pragma: no cover - standalone use
 _PASS_WORDS = {"pass", "passed", "present", "ok", "found"}
 _WARN_WORDS = {"warn", "warning"}
 _FAIL_WORDS = {"fail", "failed", "missing", "error"}
+
+# Column names prettified for the table head. Anything not listed keeps
+# its own name, title-cased.
+_HEADERS = {
+    "item": "Check",
+    "rule": "Rule",
+    "status": "Status",
+    "severity": "Status",
+    "detail": "Detail / suggested action",
+    "expected": "Expected",
+    "found": "Found",
+    "category": "Category",
+    "module": "Module",
+    "passed": "Passed",
+    "warnings": "Warnings",
+    "failed": "Failed",
+}
 
 
 def _status_class(value: object) -> str:
@@ -76,25 +99,31 @@ def _cell(value: object) -> str:
     return _html.escape(text).replace("\n", "<br>")
 
 
-def _table_html(df: pd.DataFrame, status_col: str) -> str:
+def _header(col: str) -> str:
+    return _HEADERS.get(str(col).strip().lower(), str(col).replace("_", " ").title())
+
+
+def _table_html(df: pd.DataFrame, status_col: str, start_index: int = 1) -> str:
+    """One result table. The leading "#" column is the reference design's
+    row number; it is generated here rather than taken from the data so
+    that a filtered tab still numbers its rows 1..n."""
     if df is None or not len(df):
         return ""
 
     cols = list(df.columns)
-    head = "".join(f"<th>{_html.escape(str(c))}</th>" for c in cols)
+    head = "<th></th>" + "".join(f"<th>{_html.escape(_header(c))}</th>" for c in cols)
 
     rows_html = []
-    for _, row in df.iterrows():
+    for n, (_, row) in enumerate(df.iterrows(), start=start_index):
         cls = _status_class(row.get(status_col, ""))
-        cells = []
-        for c in cols:
+        cells = [f'<td class="oq-idx">{n}</td>']
+        for ci, c in enumerate(cols):
             val = row.get(c, "")
             if c == status_col and cls:
-                cells.append(
-                    f'<td><span class="oq-status {cls}">{_cell(val)}</span></td>'
-                )
+                cells.append(f'<td><span class="oq-status {cls}">{_cell(val)}</span></td>')
             else:
-                cells.append(f"<td>{_cell(val)}</td>")
+                extra = ' class="oq-first"' if ci == 0 and c != status_col else ""
+                cells.append(f"<td{extra}>{_cell(val)}</td>")
         row_cls = f' class="oq-{cls}"' if cls else ""
         rows_html.append(f"<tr{row_cls}>{''.join(cells)}</tr>")
 
@@ -112,24 +141,34 @@ def _render_table(df: pd.DataFrame, status_col: str) -> None:
         st.markdown(html, unsafe_allow_html=True)
 
 
+def _empty(message: str, tone: str = "plain") -> None:
+    icon = _theme.icon_html("check-circle" if tone == "ok" else "info", 16)
+    st.markdown(
+        f'<div class="oq-empty {"" if tone == "ok" else "plain"}">{icon}'
+        f'<span>{_html.escape(message)}</span></div>',
+        unsafe_allow_html=True,
+    )
 
-def _disclosure_html(label: str, inner_html: str) -> str:
-    """A native <details>/<summary> dropdown.
 
-    This was briefly a Streamlit button plus a session-state flag, because
-    st.expander refuses to nest inside the per-email result groups. But a
-    button round-trips to the server and re-runs the whole script just to
-    show rows that were already computed, so every click flashed the
-    "Running..." indicator and rebuilt the page.
+def _count_strip(n_fail: int, n_warn: int, n_pass: int, n_total: int) -> None:
+    """The always-visible summary above the tabs.
 
-    A plain <details> element is opened by the browser itself: instant, no
-    rerun, and no nesting restriction either, since it is ordinary HTML
-    rather than a Streamlit container. The table markup is already
-    generated as a string, so it simply goes inside.
+    This is the reason a tabbed table does not hide anything: whichever
+    tab is open, the failure and warning totals are on screen.
     """
-    return (
-        f'<details class="oq-details"><summary>{_html.escape(label)}</summary>'
-        f'<div class="oq-details-body">{inner_html}</div></details>'
+    bits = []
+    if n_fail:
+        bits.append(_theme.chip(f"{n_fail} issue" + ("s" if n_fail != 1 else ""), "bad", "x-circle"))
+    if n_warn:
+        bits.append(_theme.chip(f"{n_warn} warning" + ("s" if n_warn != 1 else ""), "warn", "alert-triangle"))
+    if n_pass:
+        bits.append(_theme.chip(f"{n_pass} passed", "ok", "check-circle"))
+    if not n_fail and not n_warn and n_total:
+        bits.insert(0, _theme.chip("All checks passed", "ok", "shield"))
+    bits.append(_theme.chip(f"{n_total} checks total", "ghost", "doc-stack"))
+    st.markdown(
+        f'<div class="dq-kv" style="margin:.1rem 0 .55rem 0">{"".join(bits)}</div>',
+        unsafe_allow_html=True,
     )
 
 
@@ -141,49 +180,66 @@ def render_qa_table(
 ) -> None:
     """The single shared QA table renderer — see the module docstring."""
     if df is None or not len(df):
-        st.markdown(
-            '<div class="oq-empty">No checks were produced for this section.</div>',
-            unsafe_allow_html=True,
-        )
+        _empty("No checks were produced for this section.")
         return
 
     if status_col not in df.columns:
         _render_table(df, status_col)
         return
 
-    mask = df[status_col].apply(_is_attention)
-    attention_df = df[mask]
-    passed_df = df[~mask]
+    classes = df[status_col].apply(_status_class)
+    fail_df = df[classes == "fail"]
+    warn_df = df[classes == "warn"]
+    pass_df = df[classes == "pass"]
+    other_df = df[classes == ""]
+    # Rows with a status word the vocabulary does not know are shown with
+    # the issues, never dropped: an unrecognised status is exactly the
+    # kind of thing a reviewer must see rather than have filtered away.
+    if len(other_df):
+        fail_df = pd.concat([fail_df, other_df], ignore_index=True)
 
-    # "Expand" opens the complete table in a modal.
-    spacer, btn = st.columns([6, 1])
+    n_fail, n_warn, n_pass, n_total = len(fail_df), len(warn_df), len(pass_df), len(df)
+
+    # One header row: the always-visible counts on the left, the table's
+    # own action on the right — the same shape as the reference design's
+    # result header.
+    _counts_col, btn = st.columns([6, 1])
+    with _counts_col:
+        _count_strip(n_fail, n_warn, n_pass, n_total)
     with btn:
         expand_clicked = st.button(
-            "↗ Expand", key=f"{table_key}__expand", use_container_width=True
+            "↗ Expand", key=f"{table_key}__expand", use_container_width=True,
+            help="Open every row of this table in a full-screen popup.",
         )
-
     if expand_clicked:
         st.session_state[f"{table_key}__dialog_open"] = True
-
     if st.session_state.get(f"{table_key}__dialog_open"):
         _open_dialog(df, status_col, table_key)
 
-    if len(attention_df):
-        _render_table(attention_df, status_col)
-    else:
-        st.markdown(
-            '<div class="oq-empty">Nothing needs attention here — every check passed.</div>',
-            unsafe_allow_html=True,
-        )
+    tabs = st.tabs([
+        f"Issues ({n_fail})",
+        f"Warnings ({n_warn})",
+        f"{pass_label} ({n_pass})",
+        f"All records ({n_total})",
+    ])
 
-    if len(passed_df):
-        st.markdown(
-            _disclosure_html(
-                f"{pass_label} ({len(passed_df)}) — click to view",
-                _table_html(passed_df, status_col),
-            ),
-            unsafe_allow_html=True,
-        )
+    with tabs[0]:
+        if n_fail:
+            _render_table(fail_df, status_col)
+        else:
+            _empty("Nothing needs attention here — no check failed.", tone="ok")
+    with tabs[1]:
+        if n_warn:
+            _render_table(warn_df, status_col)
+        else:
+            _empty("No warnings were raised for this section.")
+    with tabs[2]:
+        if n_pass:
+            _render_table(pass_df, status_col)
+        else:
+            _empty("No rows passed in this section yet.")
+    with tabs[3]:
+        _render_table(df, status_col)
 
 
 def _open_dialog(df: pd.DataFrame, status_col: str, table_key: str) -> None:
@@ -203,28 +259,48 @@ def _open_dialog(df: pd.DataFrame, status_col: str, table_key: str) -> None:
     @dialog_fn("Full QA table", width="large")
     def _show():
         _render_table(df, status_col)
-        if st.button("Close", key=f"{table_key}__dialog_close"):
+        if st.button("Close", key=f"{table_key}__dialog_close", type="primary"):
             st.session_state[f"{table_key}__dialog_open"] = False
             st.rerun()
 
     _show()
 
 
+def render_stat_row(passed: int, warnings: int, failed: int, total: Optional[int] = None,
+                    total_label: str = "Total checks") -> None:
+    """The four KPI tiles used above every result table."""
+    if total is None:
+        total = passed + warnings + failed
+    _theme.stat_tiles([
+        (total_label, total, "total", "doc-stack", ""),
+        ("Passed", passed, "ok", "check-circle",
+         f"{(passed / total * 100):.1f}%" if total else ""),
+        ("Failed", failed, "bad", "x-circle",
+         f"{(failed / total * 100):.1f}%" if total else ""),
+        ("Warnings", warnings, "warn", "alert-triangle",
+         f"{(warnings / total * 100):.1f}%" if total else ""),
+    ])
+
+
 def render_module_result(result: ModuleResult, table_key: str) -> None:
-    """Renders one ModuleResult: heading, Pass/Warn/Fail metrics, its item
+    """Renders one ModuleResult: heading, Pass/Warn/Fail tiles, its item
     table, then any notes and images the module attached."""
     if result is None:
         return
 
-    st.markdown(f"**{_html.escape(result.module_name)}**")
+    st.markdown(
+        f'<div class="dq-head" style="margin:.2rem 0 .1rem 0">'
+        f'<div class="dq-head-ico" style="background:{_theme.BRAND_TINT};color:{_theme.BRAND}">'
+        f'{_theme.icon_html("check-square", 18)}</div>'
+        f'<div class="dq-head-txt"><div class="dq-head-title">'
+        f'{_html.escape(result.module_name)}</div></div></div>',
+        unsafe_allow_html=True,
+    )
 
     items = result.items or []
     if items:
         p, f, w = result.counts()
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Passed", p)
-        c2.metric("Warnings", w)
-        c3.metric("Failed", f)
+        render_stat_row(passed=p, warnings=w, failed=f, total=len(items))
 
         df = pd.DataFrame([{
             "category": i.category,
@@ -247,41 +323,45 @@ def render_module_result(result: ModuleResult, table_key: str) -> None:
                 st.image(art.png_bytes, caption=art.label, use_container_width=True)
 
     if not items and not result.notes and not images:
-        st.markdown(
-            '<div class="oq-empty">This check did not run — nothing to report.</div>',
-            unsafe_allow_html=True,
-        )
+        _empty("This check did not run — nothing to report.")
 
 
 def render_summary(results: Sequence[ModuleResult], table_key: str) -> None:
     """One row per module: its overall verdict plus Pass/Warn/Fail counts."""
     results = [r for r in (results or []) if r is not None]
     if not results:
-        st.markdown(
-            '<div class="oq-empty">No Advanced QA modules produced results for this email.</div>',
-            unsafe_allow_html=True,
-        )
+        _empty("No Advanced QA modules produced results for this email.")
         return
 
     rows = []
-    tot_p = tot_w = tot_f = 0
+    mod_pass = mod_warn = mod_fail = 0
     for r in results:
         p, f, w = r.counts()
-        tot_p += p
-        tot_w += w
-        tot_f += f
+        status = r.overall_status() if r.items else WARN
+        cls = _status_class(status)
+        if cls == "pass":
+            mod_pass += 1
+        elif cls == "fail":
+            mod_fail += 1
+        else:
+            mod_warn += 1
         rows.append({
             "module": r.module_name,
-            "status": r.overall_status() if r.items else WARN,
+            "status": status,
             "passed": p,
             "warnings": w,
             "failed": f,
         })
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Passed", tot_p)
-    c2.metric("Warnings", tot_w)
-    c3.metric("Failed", tot_f)
+    # The tiles count MODULES, not individual checks, because that is what
+    # the table below them lists — one row per module with one verdict.
+    # Summing every module's item counts instead produced the confusing
+    # pairing of "0 checks" tiles above a four-row table, since a module
+    # that could not run at all reports a Warn verdict and zero items.
+    render_stat_row(
+        passed=mod_pass, warnings=mod_warn, failed=mod_fail,
+        total=len(results), total_label="Modules run",
+    )
 
     render_qa_table(
         pd.DataFrame(rows), status_col="status",

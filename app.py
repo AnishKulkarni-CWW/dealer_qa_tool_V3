@@ -50,13 +50,25 @@ from modules.results import ModuleResult as ExtModuleResult
 from modules.config import DEFAULT_CONFIG as EXT_CFG
 
 
-st.set_page_config(page_title="Dealer Panel QA", layout="wide")
+st.set_page_config(
+    page_title="Dealer Panel QA Tool",
+    page_icon="\U0001F697",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# Full SaaS/Startup visual theme (colors, type, cards, buttons, tables —
-# see modules/theme.py). This ONLY changes appearance; every widget below
-# keeps its exact arguments, keys, and return values. The old two-rule
-# dataframe-scroll fix is now part of the theme's stDataFrame styling.
-ext_theme.inject()
+# The whole visual system — palette, navigation rail, top bar, cards, stat
+# tiles, tables and every Streamlit widget restyle — lives in
+# modules/theme.py. This ONLY changes appearance; every widget below keeps
+# its exact arguments, keys and return values.
+#
+# Density is read straight from session_state rather than from a local
+# variable because the stylesheet has to be injected before ANY widget is
+# created, while the control that sets it lives on the Settings view far
+# below. Streamlit has already committed the new value to session_state by
+# the time the next run reaches this line, so the change lands on the very
+# rerun the user's click triggers.
+ext_theme.inject(density=st.session_state.get("dq_pref_density", "comfortable"))
 
 
 # =========================================================
@@ -1959,348 +1971,729 @@ def _cached_emailer_index(pdf_bytes: bytes):
 # =========================================================
 # UI
 # =========================================================
-# Single flowing page (no tabs) — every input section stacks top to
-# bottom in one straightforward order: hero, Excel upload, email input
-# type, HTML/model uploads, Advanced QA toggle, Run QA button, and
-# THEN (below the button) Dealer Name Validation + the Master-mode
-# blocks side by side in two columns so that part of the page doesn't
-# add extra vertical scroll. Every widget below keeps its EXACT key,
-# EXACT type, and EXACT position relative to its sibling widgets —
-# this is purely a reordering/flattening of where things render;
-# nothing about what any widget returns or how downstream code reads
-# it has changed. Each variable is still assigned exactly once, before
-# anything that reads it, in the same relative order data becomes
-# available (Excel must be uploaded before dealer_rows can exist,
-# input_mode must be chosen before email_jobs can be built, etc.).
+# The console layout: a dark navigation rail, a sticky product bar, a
+# welcome panel, a live progress rail, then the numbered workflow —
+# Upload → Options → Master Reference → Run → Results — with every result
+# set rendered as KPI tiles above a tabbed record table.
+#
+# TWO RULES THIS SECTION OBEYS
+# ----------------------------
+# 1. Presentation only. Every widget below keeps its EXACT key, EXACT
+#    type and EXACT relative order to the widgets whose values it feeds.
+#    The redesign moves widgets between cards and columns; it never
+#    changes what any of them returns or how downstream code reads it.
+#    Each variable is still assigned exactly once, before anything that
+#    reads it, in the same order data becomes available (Excel before
+#    dealer_rows, input_mode before email_jobs, masters before the run
+#    block, and so on).
+#
+# 2. Nothing is ever unmounted. Streamlit throws away the state of any
+#    widget it did not render on the latest run, so switching to
+#    Settings or Help would silently drop uploaded files and typed
+#    master text. The workflow is therefore ALWAYS rendered and simply
+#    hidden by CSS (ext_theme.hidden) when another view is on screen.
 # ---------------------------------------------------------------
 
-ext_theme.render_hero(
-    title="Dealer Panel QA Tool",
-    subtitle="Compares the 'Mailers - NSC ' sheet (Dealer / Region / Dealer Panels) against dealer-panel HTML email code, and QAs styling rules.",
-    badge="BMW · MINI",
+# ---- Navigation rail ------------------------------------------------
+# The OCR engine probe is cheap (an import check plus a version call) and
+# its result is worth showing up front: whether a banner's Headline /
+# Subheadline / Dealer Name can be read at all depends on it, and finding
+# that out only after a run is too late to be useful.
+try:
+    _nav_ocr_ok, _nav_ocr_engine, _nav_ocr_msg = ext_ocr.ocr_status()
+except Exception:
+    _nav_ocr_ok, _nav_ocr_engine, _nav_ocr_msg = False, "none", ""
+
+_OCR_LABELS = {
+    "paddleocr": "PaddleOCR",
+    "tesseract": "Tesseract",
+    "rapidocr": "RapidOCR",
+    "none": "Not installed",
+}
+
+ext_view = ext_theme.render_sidebar(
+    nav_items=[
+        ("home", "Home"),
+        ("qa", "QA Validation"),
+        ("settings", "Settings"),
+        ("help", "Help"),
+    ],
+    key="dq_nav",
+    footer_title="Drive Quality Forward",
+    footer_note="Nothing is uploaded anywhere — every file you add stays in this "
+                "browser session and is discarded when you close the tab.",
+    stats=[
+        ("shield", _OCR_LABELS.get(_nav_ocr_engine, _nav_ocr_engine), "Banner OCR engine"),
+        ("zap", "Session only", "No history, no sign-in"),
+    ],
 )
 
-# ---- 1. Excel upload + sheet selection ----
-with ext_theme.section("content", "Excel & Mode"):
-    st.subheader("Inputs")
-    excel_upload = st.file_uploader("Upload dealer panel Excel (.xlsx / .xls)", type=["xlsx", "xls"])
-    st.caption("Reads the 'Mailers - NSC ' sheet — columns: Dealer, Region, Dealer Panels (plus any additional branch/location columns after it).")
+# ---- Sticky product bar ---------------------------------------------
+ext_theme.render_topbar(
+    title="Dealer Panel QA Tool",
+    subtitle="Validate. Compare. Ensure data accuracy.",
+    chips=[
+        ext_theme.chip("BMW · MINI", "brand", "car"),
+        ext_theme.chip(
+            f"OCR: {_OCR_LABELS.get(_nav_ocr_engine, _nav_ocr_engine)}",
+            "ok" if _nav_ocr_ok else "warn",
+            "check-circle" if _nav_ocr_ok else "alert-triangle",
+        ),
+    ],
+)
 
-    ext_selected_sheet = None
-    ext_workbook = None
-    if excel_upload is not None:
-        st.divider()
-        st.subheader("Excel Sheet Selection (optional)")
-        try:
-            ext_workbook = ext_excel.open_workbook(excel_upload)
-            ext_selected_sheet = st.selectbox(
-                "Select Excel Sheet",
-                options=["(auto-detect - default behaviour)"] + ext_workbook.sheet_names,
+
+# =========================================================
+# Settings view
+# =========================================================
+# Rendered BEFORE the workflow because the workflow calls st.stop() when
+# a required upload is missing — anything rendered after that point would
+# never appear.
+if ext_view == "settings":
+    ext_theme.section_title(
+        "Settings", "Preferences for this browser session", "settings")
+
+    _set_a, _set_b = st.columns(2, gap="large")
+
+    with _set_a:
+        with ext_theme.section("settings", "Display",
+                               "How results and the workspace are rendered"):
+            st.radio(
+                "Result table density",
+                options=["comfortable", "compact"],
+                index=0 if st.session_state.get("dq_pref_density", "comfortable") == "comfortable" else 1,
+                key="dq_pref_density",
+                horizontal=True,
+                help="Compact tightens every result row so more checks fit on screen.",
+            )
+            st.toggle(
+                "Show the welcome panel on Home",
+                value=st.session_state.get("dq_pref_hero", True),
+                key="dq_pref_hero",
+            )
+            st.toggle(
+                "Show the progress rail above the workflow",
+                value=st.session_state.get("dq_pref_stepper", True),
+                key="dq_pref_stepper",
+            )
+            st.caption(
+                "Both settings take effect immediately and apply to this browser "
+                "session only."
+            )
+
+        with ext_theme.section("advanced", "Session",
+                               "Clear everything and start over"):
+            st.caption(
+                "This tool keeps no history and has no sign-in. Files live in the "
+                "browser session and disappear when the tab is closed. Resetting "
+                "clears uploads, typed master text and the last run's results."
+            )
+            if st.button("Reset this session", use_container_width=True,
+                         key="dq_reset_session"):
+                _keep = {"dq_nav"}
+                for _k in [k for k in st.session_state.keys() if k not in _keep]:
+                    del st.session_state[_k]
+                st.rerun()
+
+    with _set_b:
+        with ext_theme.section("content", "Environment",
+                               "What this install can and cannot do"):
+            st.markdown(
+                f'<div class="dq-kv">'
+                f'<div class="dq-kv-item"><b>Banner OCR</b> · '
+                f'{html_escape_module.escape(_OCR_LABELS.get(_nav_ocr_engine, _nav_ocr_engine))}</div>'
+                f'<div class="dq-kv-item"><b>Excel sheet</b> · Mailers - NSC </div>'
+                f'<div class="dq-kv-item"><b>Website link QA</b> · '
+                f'{"available" if ext_website_link_qa is not None else "module missing"}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            if _nav_ocr_msg:
+                ext_theme.banner(
+                    html_escape_module.escape(_nav_ocr_msg),
+                    "ok" if _nav_ocr_ok else "warn",
+                    "check-circle" if _nav_ocr_ok else "alert-triangle",
+                )
+
+        with ext_theme.section("style", "QA thresholds",
+                               "Read-only — defined in modules/config.py"):
+            _cfg_rows = []
+            for _name in sorted(dir(EXT_CFG)):
+                if _name.startswith("_"):
+                    continue
+                _val = getattr(EXT_CFG, _name)
+                if callable(_val):
+                    continue
+                _cfg_rows.append({"Setting": _name, "Value": str(_val)})
+            if _cfg_rows:
+                st.dataframe(_cfg_rows, use_container_width=True, hide_index=True,
+                             height=260)
+            else:
+                st.caption("No tunable thresholds are exposed by this build.")
+
+
+# =========================================================
+# Help view
+# =========================================================
+if ext_view == "help":
+    ext_theme.section_title("Help", "How the tool works, end to end", "help")
+
+    _help_a, _help_b = st.columns([1.25, 1], gap="large")
+
+    with _help_a:
+        with ext_theme.section("help", "Running a QA pass",
+                               "Five steps, start to finish"):
+            st.markdown(
+                """
+                <ol class="dq-help-ol">
+                  <li><b>Upload the dealer master sheet.</b> The workbook's
+                      <i>Mailers&nbsp;-&nbsp;NSC&nbsp;</i> sheet is read
+                      automatically — columns <b>Dealer</b>, <b>Region</b>,
+                      <b>Dealer Panels</b>, plus every additional branch column
+                      to the right of it. Pick a different sheet by hand from
+                      <b>Excel sheet</b> if the workbook is laid out unusually.</li>
+                  <li><b>Upload the email(s) to check.</b> Either the raw
+                      <b>HTML file(s)</b>, or a <b>model folder .zip</b>
+                      (index.html + images/). The zip route is the better one:
+                      it also enables the 300&nbsp;KB image-size check and lets
+                      Banner QA read the banner's actual pixels.</li>
+                  <li><b>Set the options.</b> Choosing a dealer makes that
+                      dealer authoritative for the whole run; leaving it on
+                      automatic detects each email's dealer from its own HTML.</li>
+                  <li><b>Add a Master reference</b> (optional) if you want
+                      Banner / Body / OCR checks — a Master JPG, a Master PDF
+                      bulletin, a Master HTML zip, or typed Manual Text.</li>
+                  <li><b>Run QA Validation</b> and read the results, then
+                      download the consolidated Excel report.</li>
+                </ol>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with ext_theme.section("exact", "What every check does",
+                               "The full rule list"):
+            st.markdown(
+                """
+                <p class="dq-help-p"><b>Content QA</b> — every line of the
+                dealer's panel text from Excel must appear in the email, found
+                by fuzzy line matching so small rendering differences don't
+                produce false failures.</p>
+                <p class="dq-help-p"><b>Dealer Panel Exact Match QA</b> —
+                the same lines re-checked character for character: case,
+                spacing, phone and landline number formatting, and the
+                <code>tel:</code> link target matching the number shown.</p>
+                <p class="dq-help-p"><b>Styling QA</b> — font family, size,
+                colour and line-height rules on the dealer panel, plus double
+                spaces, punctuation spacing, the lines that must render bold
+                (dealer name and every branch/city name), and image weight.</p>
+                <p class="dq-help-p"><b>Website / CTA link QA</b> — the panel's
+                own "Website:" line and the CTA button's <code>href</code> must
+                both belong to the dealer's domain, and must agree with each
+                other. Matched by domain, so a deep link to a model page still
+                passes.</p>
+                <p class="dq-help-p"><b>Advanced QA</b> (opt-in) — Body QA
+                (dealer name in the greeting copy, As&nbsp;Is / To&nbsp;Be
+                comparison) and Banner QA (Headline, Subheadline and Dealer
+                Name read off the banner by OCR and compared with the Master).</p>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with _help_b:
+        with ext_theme.section("advanced", "Master priority",
+                               "Which reference wins"):
+            st.markdown(
+                """
+                <p class="dq-help-p">Expected Headline, Subheadline, Dealer
+                Name and Body Text are resolved <b>per field</b>, in this
+                order:</p>
+                <ol class="dq-help-ol">
+                  <li><b>Manual Text</b> — any field you typed always wins for
+                      that field.</li>
+                  <li><b>Master JPG</b></li>
+                  <li><b>Master PDF</b></li>
+                  <li><b>Master HTML ZIP</b></li>
+                  <li><b>Dealer dropdown</b> (dealer name only)</li>
+                  <li><b>Excel sheet</b></li>
+                </ol>
+                <p class="dq-help-p">A field left blank falls through to the
+                next source that can supply it. Sources are never merged.</p>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with ext_theme.section("multi", "Several emails at once",
+                               "Per-adapt masters"):
+            st.markdown(
+                """
+                <p class="dq-help-p">Upload as many emails as you like; each is
+                QA'd in the same run. When more than one is uploaded, a
+                <b>Per-Adapt Masters</b> card appears so every email can be
+                given its own Master JPG / HTML zip / manual text. Any slot left
+                empty falls back to the global Master controls.</p>
+                <p class="dq-help-p">A sales-push bulletin PDF is the exception
+                and is uploaded <b>once</b>: it already contains every model's
+                emailer page, so each email is routed to its own page
+                automatically. Anything routed wrongly can be pinned by hand.</p>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with ext_theme.section("style", "If something looks wrong",
+                               "Common causes"):
+            st.markdown(
+                """
+                <p class="dq-help-p"><b>"Could not match this email to a
+                dealer"</b> — the email's <code>BMW &lt;Dealer&gt;</code>
+                heading doesn't match any Dealer cell in the sheet. Pick the
+                dealer by hand in Validation options.</p>
+                <p class="dq-help-p"><b>Banner QA is empty</b> — the email was
+                uploaded as bare HTML with no images. Upload it as a model
+                folder .zip, or add the images .zip alongside.</p>
+                <p class="dq-help-p"><b>Headline / Subheadline blank</b> — no
+                OCR engine is installed, or no Master was supplied. The banner
+                on screen shows which.</p>
+                <p class="dq-help-p"><b>Everything fails at once</b> — usually a
+                dealer mismatch: the selected dealer isn't the dealer the email
+                was built for. The run says so in red above the tables.</p>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+# =========================================================
+# Workflow  (always rendered; hidden by CSS on the other views)
+# =========================================================
+ext_workflow_visible = ext_view in ("home", "qa")
+
+with ext_theme.hidden(not ext_workflow_visible):
+
+    if ext_view == "home" and st.session_state.get("dq_pref_hero", True):
+        ext_theme.render_hero(
+            title="Dealer Panel QA Tool",
+            subtitle="Upload the dealer master sheet and the dealer email(s) to check, "
+                     "then run content, styling, exact-match, link and banner QA — and "
+                     "download the whole thing as one Excel report.",
+            eyebrow="Welcome to",
+            features=(
+                ("zap", "Fast & Accurate", "A full QA pass in seconds"),
+                ("shield", "Detect Issues", "Content · styling · links · banner"),
+                ("chart", "Actionable Insights", "One shareable Excel report"),
+            ),
+            side_lines=("Better data", "Stronger dealers", "Brighter roads"),
+        )
+    elif ext_view == "qa":
+        ext_theme.section_title(
+            "QA Validation",
+            "Upload, configure and run — results appear below",
+            "check-square",
+        )
+
+    # The progress rail is filled in at the very bottom of this block,
+    # once we know how far along the run actually is.
+    ext_stepper_slot = st.container()
+
+    # ---- 1 / 2 : Upload + Validation options ------------------------
+    ext_col_upload, ext_col_options = st.columns([1.06, 1], gap="large")
+
+    with ext_col_upload:
+        with ext_theme.section(
+            "upload", "Upload Input Files",
+            "The dealer master sheet, then the email(s) to check", step=1,
+        ):
+            excel_upload = st.file_uploader(
+                "Dealer panel Excel (.xlsx / .xls)", type=["xlsx", "xls"])
+            st.caption(
+                "Reads the 'Mailers - NSC ' sheet — columns: Dealer, Region, "
+                "Dealer Panels (plus any additional branch/location columns after it)."
+            )
+
+            ext_selected_sheet = None
+            ext_workbook = None
+            if excel_upload is not None:
+                try:
+                    ext_workbook = ext_excel.open_workbook(excel_upload)
+                    ext_selected_sheet = st.selectbox(
+                        "Excel sheet",
+                        options=["(auto-detect — default behaviour)"] + ext_workbook.sheet_names,
+                        index=0,
+                        help="Leave on auto-detect to keep existing behaviour. Pick a sheet to load ONLY that sheet.",
+                    )
+                    if ext_selected_sheet == "(auto-detect — default behaviour)":
+                        ext_selected_sheet = None
+                except Exception as e:
+                    st.warning(f"Could not list sheets for manual selection: {e}")
+
+            dealer_rows: List[DealerRow] = []
+            sheet_used = ""
+            if excel_upload is not None:
+                if ext_selected_sheet:
+                    try:
+                        df = ext_excel.load_selected_sheet_with_header(
+                            ext_workbook, ext_selected_sheet,
+                            required_columns_lower=["dealer", "region"],
+                        )
+                        dealer_rows = build_dealer_rows_from_df(df, sheet_name=ext_selected_sheet)
+                        sheet_used = ext_selected_sheet
+                        st.success(f"Loaded {len(dealer_rows)} dealer row(s) from manually selected sheet '{sheet_used}'.")
+                    except Exception as e:
+                        st.error(str(e))
+                else:
+                    try:
+                        dealer_rows, sheet_used = read_dealer_panels_from_excel(excel_upload)
+                        st.success(f"Loaded {len(dealer_rows)} dealer row(s) from sheet '{sheet_used}'.")
+                    except Exception as e:
+                        st.error(str(e))
+
+            st.markdown('<div style="height:.45rem"></div>', unsafe_allow_html=True)
+
+            input_mode = st.radio(
+                "Email input type",
+                ["HTML file(s)", "Model folder(s) (.zip)"],
                 index=0,
-                help="Leave on auto-detect to keep existing behaviour. Pick a sheet to load ONLY that sheet.",
             )
-            if ext_selected_sheet == "(auto-detect - default behaviour)":
-                ext_selected_sheet = None
-        except Exception as e:
-            st.warning(f"Could not list sheets for manual selection: {e}")
 
-dealer_rows: List[DealerRow] = []
-sheet_used = ""
-if excel_upload is not None:
-    if ext_selected_sheet:
-        try:
-            df = ext_excel.load_selected_sheet_with_header(
-                ext_workbook, ext_selected_sheet, required_columns_lower=["dealer", "region"]
+            # Each entry: {"name": label, "html": str, "images": None|zipfile-like|dict}
+            email_jobs: List[Dict] = []
+
+            if input_mode == "HTML file(s)":
+                html_files = st.file_uploader(
+                    "HTML / HTM file(s)", type=["html", "htm", "txt"],
+                    accept_multiple_files=True)
+                images_zip = st.file_uploader(
+                    "Images .zip (optional — enables the 300KB image-size check)",
+                    type=["zip"])
+                if html_files:
+                    for hf in html_files:
+                        html_text = hf.getvalue().decode("utf-8", errors="ignore")
+                        email_jobs.append({
+                            "name": hf.name,
+                            "html": html_text,
+                            "images": images_zip,
+                            "images_zip_bytes": images_zip.getvalue() if images_zip is not None else None,
+                        })
+            else:
+                model_zips = st.file_uploader(
+                    "Model folder(s) as .zip", type=["zip"], accept_multiple_files=True)
+                if model_zips:
+                    for mz in model_zips:
+                        try:
+                            html_text, image_sizes = extract_model_zip(mz)
+                        except Exception as e:
+                            st.error(f"Could not read '{mz.name}': {e}")
+                            continue
+                        if not html_text:
+                            st.error(f"No HTML file found inside '{mz.name}'.")
+                            continue
+                        email_jobs.append({
+                            "name": mz.name,
+                            "html": html_text,
+                            "images": image_sizes,
+                            # Raw zip bytes kept so Banner QA can pull the actual
+                            # banner pixels out of the model folder's images/
+                            # directory. Stored as bytes rather than the uploaded
+                            # file object because zipfile consumes the stream and
+                            # several jobs read from it in the same run.
+                            "images_zip_bytes": mz.getvalue(),
+                        })
+
+            if email_jobs:
+                st.markdown(
+                    '<div class="dq-kv">'
+                    + "".join(
+                        f'<div class="dq-kv-item">{ext_theme.icon_html("file", 12)} '
+                        f'&nbsp;{html_escape_module.escape(j["name"])}</div>'
+                        for j in email_jobs
+                    )
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # `_master_nonce` has to exist before any Master uploader is created,
+    # and "Clear Masters" (below) bumps it — st.file_uploader cannot be
+    # emptied from code any other way than handing it a fresh widget key.
+    if "ext_master_nonce" not in st.session_state:
+        st.session_state["ext_master_nonce"] = 0
+    _master_nonce = st.session_state["ext_master_nonce"]
+
+    with ext_col_options:
+        with ext_theme.section(
+            "options", "Validation Options",
+            "Pick the dealer, switch on the optional checks, then run", step=2,
+        ):
+            ext_selected_dealer_row = None
+            if dealer_rows:
+                ext_dealer_options = ["(none — use automatic HTML detection)"] + ext_dealer.build_dealer_options(dealer_rows)
+                ext_dealer_choice = st.selectbox(
+                    "Dealer selection", options=ext_dealer_options, key="ext_dealer_dropdown_live",
+                    help="Choosing a dealer makes that dealer authoritative for every check in this run.",
+                )
+                if ext_dealer_choice != "(none — use automatic HTML detection)":
+                    ext_selected_dealer_row = ext_dealer.resolve_selected_dealer(dealer_rows, ext_dealer_choice)
+                    if ext_selected_dealer_row:
+                        st.success(f"Master dealer set to: {ext_selected_dealer_row.dealer} ({ext_selected_dealer_row.region})")
+            else:
+                st.info("Upload the dealer panel Excel file first — the dealer list appears here once it's loaded.")
+
+            st.markdown(
+                '<div style="height:.2rem"></div>'
+                '<div class="dq-head-sub" style="margin-bottom:.35rem">'
+                'Opt-in checks — off by default. The tool behaves exactly as before '
+                'if left unticked.</div>',
+                unsafe_allow_html=True,
             )
-            dealer_rows = build_dealer_rows_from_df(df, sheet_name=ext_selected_sheet)
-            sheet_used = ext_selected_sheet
-            st.success(f"Loaded {len(dealer_rows)} dealer row(s) from manually selected sheet '{sheet_used}'.")
-        except Exception as e:
-            st.error(str(e))
-    else:
-        try:
-            dealer_rows, sheet_used = read_dealer_panels_from_excel(excel_upload)
-            st.success(f"Loaded {len(dealer_rows)} dealer row(s) from sheet '{sheet_used}'.")
-        except Exception as e:
-            st.error(str(e))
+            ext_check_dealer_in_banner = st.checkbox("Dealer exists in Banner", value=False, key="ext_dealer_in_banner")
+            ext_check_dealer_in_body = st.checkbox("Dealer exists in Body", value=False, key="ext_dealer_in_body")
 
-# ---- 2. Email input type + HTML / model-folder upload — its own
-#         section card, separate from the Excel card above, matching
-#         the screenshot reference where these render as visually
-#         distinct blocks. ----
-with ext_theme.section("email", "Email Input"):
-    input_mode = st.radio(
-        "Email input type",
-        ["HTML file(s)", "Model folder(s) (.zip)"],
-        index=0,
+            ext_run_advanced_qa = st.toggle(
+                "Enable Advanced QA (Body / Banner / OCR)", value=False, key="ext_run_advanced_qa",
+                help="Turn on to compute Banner / Body / OCR QA tabs below the existing report. Existing QA always runs regardless of this toggle.",
+            )
+
+            # A plain statement of what this run will actually cover, so the
+            # Run button is never pressed on a half-filled form and then
+            # answered with a red error further down the page.
+            _ready_bits = [
+                ext_theme.chip(
+                    f"{len(dealer_rows)} dealer row(s)" if dealer_rows else "No Excel sheet yet",
+                    "ok" if dealer_rows else "warn",
+                    "check-circle" if dealer_rows else "alert-triangle",
+                ),
+                ext_theme.chip(
+                    f"{len(email_jobs)} email(s) to check" if email_jobs else "No email uploaded yet",
+                    "ok" if email_jobs else "warn",
+                    "check-circle" if email_jobs else "alert-triangle",
+                ),
+                ext_theme.chip(
+                    ext_selected_dealer_row.dealer if ext_selected_dealer_row is not None
+                    else "Dealer auto-detected",
+                    "brand", "car",
+                ),
+            ]
+            st.markdown(
+                '<div style="height:.35rem"></div>'
+                '<div class="dq-kv">' + "".join(_ready_bits) + "</div>",
+                unsafe_allow_html=True,
+            )
+
+            _run_col, _clear_col = st.columns([2.1, 1])
+            with _run_col:
+                run_clicked = st.button(
+                    "Run QA Validation", type="primary", use_container_width=True)
+            with _clear_col:
+                clear_masters_clicked = st.button(
+                    "Clear masters", use_container_width=True,
+                    help="Removes every Master JPG / PDF / HTML ZIP and all typed Master text, "
+                         "both the global ones and every per-adapt override.",
+                )
+
+    if clear_masters_clicked:
+        ext_multi_master.clear_all()
+        for _k in ("ext_manual_headline", "ext_manual_subheadline", "ext_manual_dealer_name",
+                   "ext_manual_body_text", "ext_body_as_is", "ext_body_to_be"):
+            st.session_state.pop(_k, None)
+        st.session_state["ext_master_nonce"] = _master_nonce + 1
+        st.rerun()
+
+    def render_qa_table(df: "pd.DataFrame", status_col: str, table_key: str, pass_label: str = "Passed") -> None:
+        """
+        Thin delegate to the single shared table-rendering implementation in
+        modules/results_ui.py (see that module's docstring for why the
+        implementation itself lives there and not here) — KPI counts always
+        visible above a tabbed record table (Issues / Warnings / Passed /
+        All records), plus an Expand button that opens the complete table in
+        a popup with its own close button.
+        """
+        ext_results_ui.render_qa_table(df, status_col=status_col, table_key=table_key, pass_label=pass_label)
+
+    # ---- 3 : Master reference (optional) ----------------------------
+    ext_theme.section_title(
+        "Master Reference",
+        "Optional — needed only for Banner, Body and OCR checks",
+        "layers",
     )
 
-    # Each entry: {"name": label, "html": str, "images": None|zipfile-like|dict}
-    email_jobs: List[Dict] = []
+    ext_master_col_a, ext_master_col_b = st.columns(2, gap="large")
 
-    if input_mode == "HTML file(s)":
-        upload_col1, upload_col2 = st.columns(2)
-        with upload_col1:
-            html_files = st.file_uploader("Upload HTML / HTM file(s)", type=["html", "htm", "txt"], accept_multiple_files=True)
-        with upload_col2:
-            images_zip = st.file_uploader("Optional: images .zip (for the 300KB image-size check)", type=["zip"])
-        if html_files:
-            for hf in html_files:
-                html_text = hf.getvalue().decode("utf-8", errors="ignore")
-                email_jobs.append({
-                    "name": hf.name,
-                    "html": html_text,
-                    "images": images_zip,
-                    "images_zip_bytes": images_zip.getvalue() if images_zip is not None else None,
-                })
-    else:
-        model_zips = st.file_uploader("Upload model folder(s) as .zip", type=["zip"], accept_multiple_files=True)
-        if model_zips:
-            for mz in model_zips:
-                try:
-                    html_text, image_sizes = extract_model_zip(mz)
-                except Exception as e:
-                    st.error(f"Could not read '{mz.name}': {e}")
-                    continue
-                if not html_text:
-                    st.error(f"No HTML file found inside '{mz.name}'.")
-                    continue
-                email_jobs.append({
-                    "name": mz.name,
-                    "html": html_text,
-                    "images": image_sizes,
-                    # Raw zip bytes kept so Banner QA can pull the actual
-                    # banner pixels out of the model folder's images/
-                    # directory. Stored as bytes rather than the uploaded
-                    # file object because zipfile consumes the stream and
-                    # several jobs read from it in the same run.
-                    "images_zip_bytes": mz.getvalue(),
-                })
+    with ext_master_col_a:
+        with ext_theme.section(
+            "text", "Manual Text Master",
+            "Type what the banner should say. Any field you fill wins for that field.",
+        ):
+            ext_manual_headline = st.text_input("Headline", value="", key="ext_manual_headline")
+            ext_manual_subheadline = st.text_input("Subheadline", value="", key="ext_manual_subheadline")
+            ext_manual_dealer_name = st.text_input("Dealer Name", value="", key="ext_manual_dealer_name")
+            ext_manual_body_text = st.text_area("Body Text", value="", key="ext_manual_body_text", height=100)
+            ext_manual_master = ext_manual.ManualMasterText(
+                headline=ext_manual_headline,
+                subheadline=ext_manual_subheadline,
+                dealer_name=ext_manual_dealer_name,
+                body_text=ext_manual_body_text,
+            )
+            if ext_manual_master.is_active():
+                _ext_manual_fields_used = [
+                    label for label, is_manual in (
+                        ("Headline", ext_manual_master.headline_is_manual()),
+                        ("Subheadline", ext_manual_master.subheadline_is_manual()),
+                        ("Dealer Name", ext_manual_master.dealer_name_is_manual()),
+                        ("Body Text", ext_manual_master.body_text_is_manual()),
+                    ) if is_manual
+                ]
+                st.info(
+                    f"Manual Text Mode is ACTIVE for: {', '.join(_ext_manual_fields_used)}. "
+                    f"Those field(s) always use the typed value. Any field left blank here still "
+                    f"falls through to Master JPG / Master PDF / Master HTML ZIP / Dealer Dropdown, "
+                    f"whichever is active — master-asset uploads below are NOT disabled."
+                )
 
-# ---- 3. Advanced QA toggle ----
-ext_run_advanced_qa = st.checkbox(
-    "Enable Advanced QA tabs for this run", value=False, key="ext_run_advanced_qa",
-    help="Turn on to compute Banner / Visual / OCR / Advanced Body QA tabs below the existing report. Existing QA always runs regardless of this toggle.",
-)
+        with ext_theme.section(
+            "master-b", "Manual Body Comparison",
+            "As Is / To Be — compared against the live HTML body.",
+        ):
+            ext_body_as_is = st.text_area("As Is", value="", key="ext_body_as_is", height=80)
+            ext_body_to_be = st.text_area("To Be", value="", key="ext_body_to_be", height=80)
 
-def render_qa_table(df: "pd.DataFrame", status_col: str, table_key: str, pass_label: str = "Passed") -> None:
-    """
-    Thin delegate to the single shared table-rendering implementation in
-    modules/results_ui.py (see that module's docstring for why the
-    implementation itself lives there and not here) — Fail/Warn always
-    visible in a full-width, non-truncating table; Pass rows collapsed
-    into a closed expander; an Expand button opens the complete table in
-    a popup with its own close button.
-    """
-    ext_results_ui.render_qa_table(df, status_col=status_col, table_key=table_key, pass_label=pass_label)
-
-
-# ---- 4. Sticky action bar: Run QA + Clear Masters ----
-if "ext_master_nonce" not in st.session_state:
-    st.session_state["ext_master_nonce"] = 0
-_master_nonce = st.session_state["ext_master_nonce"]
-
-with ext_theme.sticky_bar():
-    _run_col, _clear_col = st.columns([5, 1])
-    with _run_col:
-        run_clicked = st.button("Run QA", type="primary", use_container_width=True)
-    with _clear_col:
-        clear_masters_clicked = st.button(
-            "Clear Masters", use_container_width=True,
-            help="Removes every Master JPG / PDF / HTML ZIP and all typed Master text, "
-                 "both the global ones and every per-adapt override.",
-        )
-
-if clear_masters_clicked:
-    ext_multi_master.clear_all()
-    for _k in ("ext_manual_headline", "ext_manual_subheadline", "ext_manual_dealer_name",
-               "ext_manual_body_text", "ext_body_as_is", "ext_body_to_be"):
-        st.session_state.pop(_k, None)
-    st.session_state["ext_master_nonce"] = _master_nonce + 1
-    st.rerun()
-
-# ---- 5. Below the button: Dealer Name Validation + Master modes,
-#         the latter laid out in two columns so this part of the page
-#         doesn't add much extra vertical scroll. Dealer Selection
-#         (the dealer dropdown) sits alongside Dealer Name Validation
-#         since both are dealer-specific and previously lived together
-#         in the same tab. ----
-with ext_theme.section("exact", "Dealer Name Validation"):
-    st.subheader("Dealer Selection & Validation")
-
-    ext_selected_dealer_row = None
-    if dealer_rows:
-        ext_dealer_options = ["(none - use automatic HTML detection)"] + ext_dealer.build_dealer_options(dealer_rows)
-        ext_dealer_choice = st.selectbox("Dealer", options=ext_dealer_options, key="ext_dealer_dropdown_live")
-        if ext_dealer_choice != "(none - use automatic HTML detection)":
-            ext_selected_dealer_row = ext_dealer.resolve_selected_dealer(dealer_rows, ext_dealer_choice)
-            if ext_selected_dealer_row:
-                st.success(f"Master dealer set to: {ext_selected_dealer_row.dealer} ({ext_selected_dealer_row.region})")
-    else:
-        st.info("Upload a dealer panel Excel file above first — the dealer dropdown will appear here once it's loaded.")
-
-    st.divider()
-    st.caption("Opt-in checks — off by default. The tool behaves exactly as before if left unticked.")
-    ext_check_dealer_in_banner = st.checkbox("Dealer exists in Banner", value=False, key="ext_dealer_in_banner")
-    ext_check_dealer_in_body = st.checkbox("Dealer exists in Body", value=False, key="ext_dealer_in_body")
-
-ext_master_col_a, ext_master_col_b = st.columns(2)
-
-with ext_master_col_a:
-    with ext_theme.section("advanced", "Manual Text Mode"):
-        st.subheader("Manual Text Mode")
-        st.caption("None of these are required. The tool behaves exactly as before if left empty.")
-        ext_manual_headline = st.text_input("Headline", value="", key="ext_manual_headline")
-        ext_manual_subheadline = st.text_input("Subheadline", value="", key="ext_manual_subheadline")
-        ext_manual_dealer_name = st.text_input("Dealer Name", value="", key="ext_manual_dealer_name")
-        ext_manual_body_text = st.text_area("Body Text", value="", key="ext_manual_body_text", height=100)
-        ext_manual_master = ext_manual.ManualMasterText(
-            headline=ext_manual_headline,
-            subheadline=ext_manual_subheadline,
-            dealer_name=ext_manual_dealer_name,
-            body_text=ext_manual_body_text,
-        )
-        if ext_manual_master.is_active():
-            _ext_manual_fields_used = [
-                label for label, is_manual in (
-                    ("Headline", ext_manual_master.headline_is_manual()),
-                    ("Subheadline", ext_manual_master.subheadline_is_manual()),
-                    ("Dealer Name", ext_manual_master.dealer_name_is_manual()),
-                    ("Body Text", ext_manual_master.body_text_is_manual()),
-                ) if is_manual
-            ]
-            st.info(
-                f"Manual Text Mode is ACTIVE for: {', '.join(_ext_manual_fields_used)}. "
-                f"Those field(s) always use the typed value. Any field left blank here still "
-                f"falls through to Master JPG / Master PDF / Master HTML ZIP / Dealer Dropdown, "
-                f"whichever is active — master-asset uploads below are NOT disabled."
+    with ext_master_col_b:
+        with ext_theme.section(
+            "image", "Master Image (JPG)",
+            "A full email screenshot — cropped to the banner automatically",
+        ):
+            ext_master_jpg_upload = st.file_uploader(
+                "Master JPG", type=["jpg", "jpeg", "png"], key=f"ext_master_jpg_{_master_nonce}",
             )
 
-    with ext_theme.section("master-b", "Manual Body Comparison"):
-        st.subheader("Manual Body Comparison")
-        st.caption("As Is / To Be — compared against the live HTML body.")
-        ext_body_as_is = st.text_area("As Is", value="", key="ext_body_as_is", height=80)
-        ext_body_to_be = st.text_area("To Be", value="", key="ext_body_to_be", height=80)
-
-with ext_master_col_b:
-    with ext_theme.section("advanced", "Master Image (JPG)"):
-        st.subheader("Master Image (JPG)")
-        ext_master_jpg_upload = st.file_uploader(
-            "Upload Master JPG", type=["jpg", "jpeg", "png"], key=f"ext_master_jpg_{_master_nonce}",
-        )
-
-    with ext_theme.section("master-b", "Master PDF"):
-        st.subheader("Master PDF")
-        ext_master_pdf_upload = st.file_uploader(
-            "Upload Master PDF", type=["pdf"], key=f"ext_master_pdf_{_master_nonce}",
-        )
-        ext_master_pdf_page = st.number_input(
-            "PDF Page Number (optional)", min_value=0, value=0, step=1, key="ext_master_pdf_page",
-            help="Leave at 0 to auto-detect the page containing the master creative.",
-        )
-
-    with ext_theme.section("master-c", "Master HTML (ZIP)"):
-        st.subheader("Master HTML (ZIP)")
-        ext_master_html_zip_upload = st.file_uploader(
-            "Upload Master HTML ZIP", type=["zip"], key=f"ext_master_html_zip_{_master_nonce}",
-        )
-
-# ---- 5b. Multi-emailer master PDF index + per-adapt Master overrides ----
-#
-# TERMINOLOGY: "master" = the approved reference we compare AGAINST;
-# "adapt" = each uploaded dealer email being QA'd. Normal QA already
-# handled many adapts at once (they all share one Excel sheet). Advanced
-# QA could not, because it only had ONE global Master JPG / HTML ZIP /
-# Manual Text block — so five adapts were all checked against a single
-# master, which can only ever be right for one of them.
-#
-# Master PDF is the exception and deliberately stays a SINGLE upload: a
-# sales-push bulletin deck already contains every model's EMAILER page in
-# one file, so each adapt is routed to its own page automatically instead
-# of being uploaded again per adapt (see modules/master_pdf_multi.py).
-ext_pdf_emailer_index = None
-ext_pdf_auto_map = {}
-if ext_master_pdf_upload is not None and email_jobs:
-    try:
-        ext_pdf_emailer_index = _cached_emailer_index(ext_master_pdf_upload.getvalue())
-        if ext_pdf_emailer_index is not None and ext_pdf_emailer_index.entries:
-            ext_pdf_auto_map = ext_master_pdf_multi.build_auto_map(email_jobs, ext_pdf_emailer_index)
-    except Exception as e:
-        ext_pdf_emailer_index = None
-        st.warning(f"Could not scan the Master PDF for multiple emailer pages: {e}")
-
-ext_multi_assignments = {}
-_ext_job_names = [j["name"] for j in email_jobs]
-
-if ext_pdf_emailer_index is not None and ext_pdf_emailer_index.entries:
-    with ext_theme.section("routing", "Master PDF — Emailer Routing"):
-        st.subheader("Master PDF — multiple emailers detected")
-        st.caption(ext_pdf_emailer_index.note)
-        _routing_rows = []
-        for _jname in _ext_job_names:
-            _entry, _reason = ext_pdf_auto_map.get(_jname, (None, ""))
-            _routing_rows.append({
-                "Adapt": _jname,
-                "Master emailer": _entry.model_label if _entry else "— not matched —",
-                "PDF page": _entry.page_number if _entry else "",
-                "How it was matched": _reason,
-            })
-        if _routing_rows:
-            st.dataframe(_routing_rows, use_container_width=True, hide_index=True)
-        st.caption(
-            "Each adapt is routed to its own model's EMAILER page in this one deck — "
-            "no separate master PDF per adapt is needed. Anything routed incorrectly "
-            "can be pinned by hand in the Per-Adapt Masters card below."
-        )
-
-if len(_ext_job_names) > 1 or (ext_pdf_emailer_index is not None and ext_pdf_emailer_index.entries):
-    with ext_theme.section("multi", "Per-Adapt Masters"):
-        st.subheader("Per-Adapt Masters")
-        st.caption(
-            "Give each uploaded adapt its own Master JPG / Master HTML ZIP / Manual Text / "
-            "Manual Body. Every adapt is checked against its own Master in the SAME run — "
-            "you do not need to open each one first. Any slot left empty falls back to the "
-            "global Master controls above."
-        )
-        ext_multi_assignments = ext_multi_master.render_panel(
-            _ext_job_names,
-            pdf_index=ext_pdf_emailer_index,
-            pdf_auto_map=ext_pdf_auto_map,
-            nonce=_master_nonce,
-        )
-
-if run_clicked:
-    st.session_state["ext_has_run"] = True
-run = st.session_state.get("ext_has_run", False)
-
-if run:
-    if not dealer_rows:
-        st.error("Please upload the dealer panel Excel file first.")
-        st.stop()
-    if not email_jobs:
-        st.error("Please upload at least one HTML file or model folder.")
-        st.stop()
-
-    ext_theme_results_group_opened = True
-    ext_theme_results_group = ext_theme.group("Results")
-    ext_theme_results_group.__enter__()
-
-    ext_report_jobs: List[ext_excel_report.JobReportData] = []
-
-    for job_idx, job in enumerate(email_jobs):
-        # Each email gets its own collapsible group so a multi-adapt run
-        # can be reviewed one email at a time instead of scrolling past
-        # every table for every model. The body still EXECUTES when the
-        # group is collapsed - Streamlit only hides it visually - so the
-        # consolidated Excel report is always complete regardless of which
-        # groups happen to be open.
-        with st.expander(
-            f"{job_idx + 1}.  {job['name']}",
-            expanded=(len(email_jobs) == 1),
+        with ext_theme.section(
+            "pdf", "Master PDF",
+            "A sales-push bulletin — every model's emailer page is routed automatically",
         ):
+            ext_master_pdf_upload = st.file_uploader(
+                "Master PDF", type=["pdf"], key=f"ext_master_pdf_{_master_nonce}",
+            )
+            ext_master_pdf_page = st.number_input(
+                "PDF page number (optional)", min_value=0, value=0, step=1, key="ext_master_pdf_page",
+                help="Leave at 0 to auto-detect the page containing the master creative.",
+            )
 
-            with ext_theme.section("neutral", job["name"]):
-                st.header(job["name"])
+        with ext_theme.section(
+            "zip", "Master HTML (ZIP)",
+            "The approved master email as html + images/",
+        ):
+            ext_master_html_zip_upload = st.file_uploader(
+                "Master HTML ZIP", type=["zip"], key=f"ext_master_html_zip_{_master_nonce}",
+            )
+
+    # ---- Multi-emailer master PDF index + per-adapt Master overrides --
+    #
+    # TERMINOLOGY: "master" = the approved reference we compare AGAINST;
+    # "adapt" = each uploaded dealer email being QA'd. Normal QA already
+    # handled many adapts at once (they all share one Excel sheet). Advanced
+    # QA could not, because it only had ONE global Master JPG / HTML ZIP /
+    # Manual Text block — so five adapts were all checked against a single
+    # master, which can only ever be right for one of them.
+    #
+    # Master PDF is the exception and deliberately stays a SINGLE upload: a
+    # sales-push bulletin deck already contains every model's EMAILER page in
+    # one file, so each adapt is routed to its own page automatically instead
+    # of being uploaded again per adapt (see modules/master_pdf_multi.py).
+    ext_pdf_emailer_index = None
+    ext_pdf_auto_map = {}
+    if ext_master_pdf_upload is not None and email_jobs:
+        try:
+            ext_pdf_emailer_index = _cached_emailer_index(ext_master_pdf_upload.getvalue())
+            if ext_pdf_emailer_index is not None and ext_pdf_emailer_index.entries:
+                ext_pdf_auto_map = ext_master_pdf_multi.build_auto_map(email_jobs, ext_pdf_emailer_index)
+        except Exception as e:
+            ext_pdf_emailer_index = None
+            st.warning(f"Could not scan the Master PDF for multiple emailer pages: {e}")
+
+    ext_multi_assignments = {}
+    _ext_job_names = [j["name"] for j in email_jobs]
+
+    if ext_pdf_emailer_index is not None and ext_pdf_emailer_index.entries:
+        with ext_theme.section(
+            "routing", "Master PDF — Emailer Routing",
+            ext_pdf_emailer_index.note,
+        ):
+            _routing_rows = []
+            for _jname in _ext_job_names:
+                _entry, _reason = ext_pdf_auto_map.get(_jname, (None, ""))
+                _routing_rows.append({
+                    "Adapt": _jname,
+                    "Master emailer": _entry.model_label if _entry else "— not matched —",
+                    "PDF page": _entry.page_number if _entry else "",
+                    "How it was matched": _reason,
+                })
+            if _routing_rows:
+                st.dataframe(_routing_rows, use_container_width=True, hide_index=True)
+            st.caption(
+                "Each adapt is routed to its own model's EMAILER page in this one deck — "
+                "no separate master PDF per adapt is needed. Anything routed incorrectly "
+                "can be pinned by hand in the Per-Adapt Masters card below."
+            )
+
+    if len(_ext_job_names) > 1 or (ext_pdf_emailer_index is not None and ext_pdf_emailer_index.entries):
+        with ext_theme.section(
+            "multi", "Per-Adapt Masters",
+            "Give each uploaded email its own Master — anything left empty falls back to the global controls above",
+        ):
+            ext_multi_assignments = ext_multi_master.render_panel(
+                _ext_job_names,
+                pdf_index=ext_pdf_emailer_index,
+                pdf_auto_map=ext_pdf_auto_map,
+                nonce=_master_nonce,
+            )
+
+    # ---- Progress rail (now that the run's state is known) -----------
+    if st.session_state.get("dq_pref_stepper", True):
+        if st.session_state.get("ext_has_run") and dealer_rows and email_jobs:
+            _ext_step = 3
+        elif dealer_rows and email_jobs:
+            _ext_step = 2
+        elif dealer_rows or email_jobs:
+            _ext_step = 1
+        else:
+            _ext_step = 0
+        with ext_stepper_slot:
+            ext_theme.render_stepper(
+                [
+                    ("Upload files", "Excel + email(s)"),
+                    ("Configure", "Dealer, options, master"),
+                    ("Run QA", "All checks in one pass"),
+                    ("View results", "Report + Excel export"),
+                ],
+                current=_ext_step,
+            )
+
+    # ---- 4 : Run --------------------------------------------------------
+    if run_clicked:
+        st.session_state["ext_has_run"] = True
+    run = st.session_state.get("ext_has_run", False)
+
+    if run:
+        if not dealer_rows:
+            st.error("Please upload the dealer panel Excel file first.")
+            st.stop()
+        if not email_jobs:
+            st.error("Please upload at least one HTML file or model folder.")
+            st.stop()
+
+        ext_theme_results_group_opened = True
+        ext_theme_results_group = ext_theme.group("Results")
+        ext_theme_results_group.__enter__()
+
+        ext_report_jobs: List[ext_excel_report.JobReportData] = []
+
+        for job_idx, job in enumerate(email_jobs):
+            # Each email gets its own collapsible group so a multi-adapt run
+            # can be reviewed one email at a time instead of scrolling past
+            # every table for every model. The body still EXECUTES when the
+            # group is collapsed - Streamlit only hides it visually - so the
+            # consolidated Excel report is always complete regardless of which
+            # groups happen to be open.
+            with st.expander(
+                f"{job_idx + 1}.  {job['name']}",
+                expanded=(len(email_jobs) == 1),
+            ):
 
                 auto_detected_dealer_row = detect_dealer_from_html(job["html"], dealer_rows)
 
@@ -2331,637 +2724,690 @@ if run:
                     st.error("Could not automatically match this email to a dealer from the Excel sheet.")
                     continue
 
+                # Header strip for this email: the file, its dealer, and how
+                # that dealer was decided.
+                _job_chips = [
+                    ext_theme.chip(dealer_row.dealer, "brand", "car"),
+                ]
+                if dealer_row.region:
+                    _job_chips.append(ext_theme.chip(dealer_row.region, "ghost", ""))
+                _job_chips.append(ext_theme.chip(
+                    "dealer selected by hand" if ext_selected_dealer_row is not None
+                    else "dealer auto-detected from HTML",
+                    "ghost", "info",
+                ))
+                st.markdown(
+                    f'<div class="dq-head" style="margin-bottom:.3rem">'
+                    f'<div class="dq-head-ico" style="background:{ext_theme.BRAND_TINT};'
+                    f'color:{ext_theme.BRAND}">{ext_theme.icon_html("file", 19)}</div>'
+                    f'<div class="dq-head-txt"><div class="dq-head-title">'
+                    f'{html_escape_module.escape(job["name"])}</div>'
+                    f'<div class="dq-topbar-chips" style="justify-content:flex-start;'
+                    f'margin-top:.35rem">{"".join(_job_chips)}</div></div></div>',
+                    unsafe_allow_html=True,
+                )
+
                 if dealer_mismatch:
-                    auto_label = f"<strong>{auto_detected_dealer_row.dealer}</strong>" if auto_detected_dealer_row else "<em>(could not be auto-detected)</em>"
-                    st.markdown(
-                        f"<div style='color:#c00000;font-weight:bold;padding:10px;border:2px solid #c00000;"
-                        f"border-radius:4px;background-color:#fff0f0;"
-                        f"box-sizing:border-box;width:100%;max-width:100%;overflow-wrap:break-word;'>"
-                        f"⚠ SELECTED DEALER MISMATCH — This email's HTML actually belongs to {auto_label}, "
-                        f"but you selected <strong>{dealer_row.dealer}</strong> ({dealer_row.region}) from the "
-                        f"Dealer Selection dropdown. Every Excel-comparable check below is being run against "
-                        f"the SELECTED dealer's data, so mismatched content is expected and correct."
-                        f"</div>",
-                        unsafe_allow_html=True,
+                    auto_label = (
+                        f"<b>{html_escape_module.escape(auto_detected_dealer_row.dealer)}</b>"
+                        if auto_detected_dealer_row else "<i>(could not be auto-detected)</i>"
                     )
+                    ext_theme.banner(
+                        f"<b>SELECTED DEALER MISMATCH</b> — this email's HTML actually belongs to "
+                        f"{auto_label}, but you selected "
+                        f"<b>{html_escape_module.escape(dealer_row.dealer)}</b> "
+                        f"({html_escape_module.escape(dealer_row.region)}) from the dealer list. "
+                        f"Every Excel-comparable check below is being run against the SELECTED "
+                        f"dealer's data, so mismatched content is expected and correct.",
+                        "bad", "alert-triangle",
+                    )
+
+                # Filled in once every table below has been computed, so the
+                # KPI tiles can sit above the tables they summarise.
+                ext_job_summary_slot = st.container()
+
+                panel_lines = panel_text_to_lines(dealer_row.panel_text)
+                results_df = compare_source_to_html(panel_lines, job["html"])
+
+                # Feature 16 — Dealer Website Link QA: verifies the CTA button's
+                # href AND the Dealer Panel's own "Website: ..." line both belong
+                # to the SELECTED (dropdown) or AUTO-DETECTED dealer's own domain
+                # (derived from the dealer name itself, since no dedicated
+                # "Website" column exists in the Excel sheet), and that the two
+                # agree with each other. `dealer_row` here is already the
+                # correctly-resolved dealer for this run (dropdown selection wins,
+                # otherwise falls back to HTML auto-detection — see the dealer
+                # resolution logic above). Rows are appended to the SAME
+                # results_df (same item/status schema as the existing Content QA
+                # table) immediately after it's built, so they render directly
+                # below the existing "Website: ..." Content QA row in the same
+                # table, in the same Pass/Fail styling.
+                if ext_website_link_qa is None:
+                    website_link_result = type("_Missing", (), {"rows": [{
+                        "item": "Dealer Website / CTA link checks",
+                        "status": "Warn",
+                        "detail": (
+                            "SKIPPED — modules/website_link_qa.py is not present in this "
+                            "folder. Copy that file from your existing project's modules/ "
+                            "folder to re-enable the Dealer Panel Website and CTA Button "
+                            "Link checks. Every other check has run normally."
+                        ),
+                    }]})()
                 else:
-                    dropdown_note = " (via Dealer Selection dropdown)" if ext_selected_dealer_row is not None else ""
-                    st.caption(f"Matched dealer: **{dealer_row.dealer}** ({dealer_row.region}){dropdown_note}")
-
-            panel_lines = panel_text_to_lines(dealer_row.panel_text)
-            results_df = compare_source_to_html(panel_lines, job["html"])
-
-            # Feature 16 — Dealer Website Link QA: verifies the CTA button's
-            # href AND the Dealer Panel's own "Website: ..." line both belong
-            # to the SELECTED (dropdown) or AUTO-DETECTED dealer's own domain
-            # (derived from the dealer name itself, since no dedicated
-            # "Website" column exists in the Excel sheet), and that the two
-            # agree with each other. `dealer_row` here is already the
-            # correctly-resolved dealer for this run (dropdown selection wins,
-            # otherwise falls back to HTML auto-detection — see the dealer
-            # resolution logic above). Rows are appended to the SAME
-            # results_df (same item/status schema as the existing Content QA
-            # table) immediately after it's built, so they render directly
-            # below the existing "Website: ..." Content QA row in the same
-            # table, in the same Pass/Fail styling.
-            if ext_website_link_qa is None:
-                website_link_result = type("_Missing", (), {"rows": [{
-                    "item": "Dealer Website / CTA link checks",
-                    "status": "Warn",
-                    "detail": (
-                        "SKIPPED — modules/website_link_qa.py is not present in this "
-                        "folder. Copy that file from your existing project's modules/ "
-                        "folder to re-enable the Dealer Panel Website and CTA Button "
-                        "Link checks. Every other check has run normally."
-                    ),
-                }]})()
-            else:
-                website_link_result = ext_website_link_qa.run_website_link_qa(
-                    dealer_name=dealer_row.dealer,
-                    panel_text=dealer_row.panel_text,
-                    html_raw=job["html"],
-                    dealer_mismatch=dealer_mismatch,
-                )
-            if website_link_result.rows:
-                website_link_df = pd.DataFrame(website_link_result.rows)
-                # compare_source_to_html() only ever produces item/status
-                # columns (no "detail"). Concatenating website_link_df (which
-                # DOES have a "detail" column) directly would union the
-                # columns and backfill every ORIGINAL content row's "detail"
-                # with NaN -- which then renders as the literal text "nan" in
-                # every existing Present/Missing row's Detail cell. Give the
-                # original rows a real empty "detail" first so the union
-                # produces "" instead of NaN for them.
-                if "detail" not in results_df.columns:
+                    website_link_result = ext_website_link_qa.run_website_link_qa(
+                        dealer_name=dealer_row.dealer,
+                        panel_text=dealer_row.panel_text,
+                        html_raw=job["html"],
+                        dealer_mismatch=dealer_mismatch,
+                    )
+                if website_link_result.rows:
+                    website_link_df = pd.DataFrame(website_link_result.rows)
+                    # compare_source_to_html() only ever produces item/status
+                    # columns (no "detail"). Concatenating website_link_df (which
+                    # DOES have a "detail" column) directly would union the
+                    # columns and backfill every ORIGINAL content row's "detail"
+                    # with NaN -- which then renders as the literal text "nan" in
+                    # every existing Present/Missing row's Detail cell. Give the
+                    # original rows a real empty "detail" first so the union
+                    # produces "" instead of NaN for them.
+                    if "detail" not in results_df.columns:
+                        results_df["detail"] = ""
+                    results_df = pd.concat([results_df, website_link_df], ignore_index=True)
+                    results_df["detail"] = results_df["detail"].fillna("")
+                elif "detail" not in results_df.columns:
                     results_df["detail"] = ""
-                results_df = pd.concat([results_df, website_link_df], ignore_index=True)
-                results_df["detail"] = results_df["detail"].fillna("")
-            elif "detail" not in results_df.columns:
-                results_df["detail"] = ""
 
-            # When the dropdown-SELECTED dealer doesn't match the dealer this
-            # email's HTML actually belongs to (dealer_mismatch, computed
-            # above), every "Missing" row AND every website-link-QA "Fail"
-            # row in Content QA is collapsed onto the SAME single shared
-            # explanation. "Missing" additionally becomes "Fail" — the
-            # content isn't merely absent, it's actively wrong for the
-            # selected dealer, which is a stronger, more accurate signal for
-            # a reviewer scanning Pass/Fail/Warn at a glance. Repeating a
-            # near-identical per-row detail for every one of the dozens of
-            # mismatched lines added no information beyond what the mismatch
-            # banner above the table already explains, so all of them share
-            # one message instead.
-            if dealer_mismatch:
-                missing_mask = results_df["status"] == "Missing"
-                results_df.loc[missing_mask, "status"] = "Fail"
-                combined_mismatch_detail = (
-                    f"Dealer mismatch — this email's HTML belongs to "
-                    f"{auto_detected_dealer_row.dealer if auto_detected_dealer_row else 'a different dealer'}, "
-                    f"not the selected dealer ({dealer_row.dealer}). See the mismatch warning above."
+                # When the dropdown-SELECTED dealer doesn't match the dealer this
+                # email's HTML actually belongs to (dealer_mismatch, computed
+                # above), every "Missing" row AND every website-link-QA "Fail"
+                # row in Content QA is collapsed onto the SAME single shared
+                # explanation. "Missing" additionally becomes "Fail" — the
+                # content isn't merely absent, it's actively wrong for the
+                # selected dealer, which is a stronger, more accurate signal for
+                # a reviewer scanning Pass/Fail/Warn at a glance. Repeating a
+                # near-identical per-row detail for every one of the dozens of
+                # mismatched lines added no information beyond what the mismatch
+                # banner above the table already explains, so all of them share
+                # one message instead.
+                if dealer_mismatch:
+                    missing_mask = results_df["status"] == "Missing"
+                    results_df.loc[missing_mask, "status"] = "Fail"
+                    combined_mismatch_detail = (
+                        f"Dealer mismatch — this email's HTML belongs to "
+                        f"{auto_detected_dealer_row.dealer if auto_detected_dealer_row else 'a different dealer'}, "
+                        f"not the selected dealer ({dealer_row.dealer}). See the mismatch warning above."
+                    )
+                    fail_mask = results_df["status"] == "Fail"
+                    results_df.loc[fail_mask, "detail"] = combined_mismatch_detail
+
+                total = len(results_df)
+                # "Present" covers both the original fuzzy-match status value AND
+                # the website-link QA rows' "Pass" status (added just above) — both
+                # mean "this item is correct" and should count the same way in the
+                # Total/Present/Missing metrics. Likewise "Missing" now also covers
+                # website-link QA "Fail" rows. "Warn" rows (e.g. no CTA button
+                # found at all) are deliberately excluded from both counts, same
+                # as they always were for any other Warn-status row.
+                present = int(results_df["status"].isin(["Present", "Pass"]).sum()) if total else 0
+                missing = int(results_df["status"].isin(["Missing", "Fail"]).sum()) if total else 0
+                content_warns = total - present - missing
+
+                with ext_theme.section(
+                    "content", "Content QA",
+                    "Every line of the dealer's Excel panel must appear in the email",
+                ):
+                    ext_results_ui.render_stat_row(
+                        passed=present, warnings=content_warns, failed=missing,
+                        total=total, total_label="Content checks",
+                    )
+                    render_qa_table(results_df, status_col="status", table_key=f"content_{job_idx}", pass_label="Present")
+
+                exact_match_df = run_dealer_panel_exact_match_qa(panel_lines, job["html"], EXT_CFG)
+                if len(exact_match_df):
+                    with ext_theme.section(
+                        "exact", "Dealer Panel Exact Match QA",
+                        "Case- and space-sensitive comparison, plus phone format and link-target checks",
+                    ):
+                        ext_results_ui.render_stat_row(
+                            passed=int((exact_match_df["status"] == "Pass").sum()),
+                            warnings=int((exact_match_df["status"] == "Warn").sum()),
+                            failed=int((exact_match_df["status"] == "Fail").sum()),
+                            total=len(exact_match_df), total_label="Exact-match checks",
+                        )
+                        render_qa_table(exact_match_df, status_col="status", table_key=f"exact_{job_idx}", pass_label="Passed")
+
+                with ext_theme.section(
+                    "style", "Styling QA",
+                    "Fonts, colours, spacing, bold rules and image weight",
+                ):
+                    style_issues = run_style_qa(job["html"])
+                    double_space_issues = run_double_space_qa(job["html"], EXT_CFG)
+                    punctuation_issues = run_punctuation_spacing_qa(job["html"], EXT_CFG)
+                    bold_issues = check_bold_required_lines(job["html"], dealer_row, EXT_CFG)
+                    image_issues = run_image_size_qa(job["html"], job["images"])
+                    all_issues = style_issues + double_space_issues + punctuation_issues + bold_issues + image_issues
+
+                    style_df = pd.DataFrame([i.__dict__ for i in all_issues]) if all_issues else pd.DataFrame(columns=["rule", "severity", "detail"])
+                    fails = int((style_df["severity"] == "Fail").sum()) if len(style_df) else 0
+                    warns = int((style_df["severity"] == "Warn").sum()) if len(style_df) else 0
+                    passes = int((style_df["severity"] == "Pass").sum()) if len(style_df) else 0
+
+                    ext_results_ui.render_stat_row(
+                        passed=passes, warnings=warns, failed=fails,
+                        total=len(style_df), total_label="Styling rules",
+                    )
+                    render_qa_table(style_df, status_col="severity", table_key=f"style_{job_idx}", pass_label="Passed")
+
+                exact_match_fails = int((exact_match_df["status"] == "Fail").sum()) if len(exact_match_df) else 0
+                exact_match_warns = int((exact_match_df["status"] == "Warn").sum()) if len(exact_match_df) else 0
+                exact_match_passes = (
+                    len(exact_match_df) - exact_match_fails - exact_match_warns
+                ) if len(exact_match_df) else 0
+
+                # The run-level KPI tiles, rendered back up at the top of this
+                # email's block now that every table has been computed.
+                with ext_job_summary_slot:
+                    ext_results_ui.render_stat_row(
+                        passed=present + passes + exact_match_passes,
+                        warnings=content_warns + warns + exact_match_warns,
+                        failed=missing + fails + exact_match_fails,
+                        total=total + len(style_df) + len(exact_match_df),
+                        total_label="Total checks",
+                    )
+
+                if dealer_mismatch:
+                    st.error("SELECTED DEALER MISMATCH — see the warning above. Content/exact-match failures below are expected because this email is being checked against a different dealer's data than the one baked into its HTML.")
+                elif missing > 0 or fails > 0 or exact_match_fails > 0:
+                    st.warning("Some content is missing and/or styling rules failed — see tables above.")
+                else:
+                    st.success("All content found and all styling checks passed (or only warnings where data wasn't available).")
+
+                # Fold the exact-match / phone-format / tel-href-target checks
+                # into the SAME DataFrame shape (rule/severity/detail) used for
+                # the Excel export, so the Consolidated Excel QA Report captures
+                # these new checks too — not just the on-screen view above, which
+                # already rendered exact_match_df on its own with its own
+                # item/status/detail columns.
+                if len(exact_match_df):
+                    exact_match_for_report = exact_match_df.rename(
+                        columns={"item": "rule", "status": "severity"}
+                    )[["rule", "severity", "detail"]]
+                    style_df_for_report = pd.concat([style_df, exact_match_for_report], ignore_index=True)
+                else:
+                    style_df_for_report = style_df
+
+                ext_job_report = ext_excel_report.JobReportData(
+                    job_name=job["name"],
+                    dealer=dealer_row.dealer,
+                    region=dealer_row.region,
+                    content_df=results_df,
+                    style_df=style_df_for_report,
                 )
-                fail_mask = results_df["status"] == "Fail"
-                results_df.loc[fail_mask, "detail"] = combined_mismatch_detail
+                ext_report_jobs.append(ext_job_report)
 
-            total = len(results_df)
-            # "Present" covers both the original fuzzy-match status value AND
-            # the website-link QA rows' "Pass" status (added just above) — both
-            # mean "this item is correct" and should count the same way in the
-            # Total/Present/Missing metrics. Likewise "Missing" now also covers
-            # website-link QA "Fail" rows. "Warn" rows (e.g. no CTA button
-            # found at all) are deliberately excluded from both counts, same
-            # as they always were for any other Warn-status row.
-            present = int(results_df["status"].isin(["Present", "Pass"]).sum()) if total else 0
-            missing = int(results_df["status"].isin(["Missing", "Fail"]).sum()) if total else 0
+                if ext_run_advanced_qa:
+                    with ext_theme.section(
+                        "advanced", "Advanced QA",
+                        "Body, Banner and OCR checks against the Master reference",
+                    ):
 
-            with ext_theme.section("content", "Content QA"):
-                st.subheader("Content QA")
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Total items", total)
-                m2.metric("Present", present)
-                m3.metric("Missing", missing)
-                render_qa_table(results_df, status_col="status", table_key=f"content_{job_idx}", pass_label="Present")
-
-            exact_match_df = run_dealer_panel_exact_match_qa(panel_lines, job["html"], EXT_CFG)
-            if len(exact_match_df):
-                with ext_theme.section("exact", "Exact Match QA"):
-                    st.subheader("Dealer Panel Exact Match QA")
-                    st.caption("Case-sensitive, space-sensitive comparison against the Excel reference, plus phone/landline number format and link-target checks.")
-                    render_qa_table(exact_match_df, status_col="status", table_key=f"exact_{job_idx}", pass_label="Passed")
-
-            with ext_theme.section("style", "Styling QA"):
-                st.subheader("Styling QA")
-                style_issues = run_style_qa(job["html"])
-                double_space_issues = run_double_space_qa(job["html"], EXT_CFG)
-                punctuation_issues = run_punctuation_spacing_qa(job["html"], EXT_CFG)
-                bold_issues = check_bold_required_lines(job["html"], dealer_row, EXT_CFG)
-                image_issues = run_image_size_qa(job["html"], job["images"])
-                all_issues = style_issues + double_space_issues + punctuation_issues + bold_issues + image_issues
-
-                style_df = pd.DataFrame([i.__dict__ for i in all_issues]) if all_issues else pd.DataFrame(columns=["rule", "severity", "detail"])
-                fails = int((style_df["severity"] == "Fail").sum()) if len(style_df) else 0
-                warns = int((style_df["severity"] == "Warn").sum()) if len(style_df) else 0
-                passes = int((style_df["severity"] == "Pass").sum()) if len(style_df) else 0
-
-                s1, s2, s3 = st.columns(3)
-                s1.metric("Passed", passes)
-                s2.metric("Warnings", warns)
-                s3.metric("Failed", fails)
-
-                render_qa_table(style_df, status_col="severity", table_key=f"style_{job_idx}", pass_label="Passed")
-
-            exact_match_fails = int((exact_match_df["status"] == "Fail").sum()) if len(exact_match_df) else 0
-            if dealer_mismatch:
-                st.error("SELECTED DEALER MISMATCH — see the warning above. Content/exact-match failures below are expected because this email is being checked against a different dealer's data than the one baked into its HTML.")
-            elif missing > 0 or fails > 0 or exact_match_fails > 0:
-                st.warning("Some content is missing and/or styling rules failed — see tables above.")
-            else:
-                st.success("All content found and all styling checks passed (or only warnings where data wasn't available).")
-
-            # Fold the exact-match / phone-format / tel-href-target checks
-            # into the SAME DataFrame shape (rule/severity/detail) used for
-            # the Excel export, so the Consolidated Excel QA Report captures
-            # these new checks too — not just the on-screen view above, which
-            # already rendered exact_match_df on its own with its own
-            # item/status/detail columns.
-            if len(exact_match_df):
-                exact_match_for_report = exact_match_df.rename(
-                    columns={"item": "rule", "status": "severity"}
-                )[["rule", "severity", "detail"]]
-                style_df_for_report = pd.concat([style_df, exact_match_for_report], ignore_index=True)
-            else:
-                style_df_for_report = style_df
-
-            ext_job_report = ext_excel_report.JobReportData(
-                job_name=job["name"],
-                dealer=dealer_row.dealer,
-                region=dealer_row.region,
-                content_df=results_df,
-                style_df=style_df_for_report,
-            )
-            ext_report_jobs.append(ext_job_report)
-
-            if ext_run_advanced_qa:
-                with ext_theme.section("advanced", "Advanced QA"):
-                    st.subheader("Advanced QA")
-
-                    # Headline / Subheadline / Dealer Name on a banner exist
-                    # only as pixels, so every one of those checks depends on
-                    # an OCR engine being installed. When none is, they all
-                    # came back blank and Banner Text QA reported "No expected
-                    # value provided for this field" - which reads like the
-                    # Master was empty rather than like the tool could not
-                    # look at it. Say so plainly instead.
-                    _ocr_ok, _ocr_engine, _ocr_msg = ext_ocr.ocr_status()
-                    if not _ocr_ok:
-                        st.error(
-                            "**Banner OCR engine not found — Headline, Subheadline and "
-                            "Dealer Name cannot be read from the banner.**\n\n" + _ocr_msg
-                        )
-                    elif _ocr_engine == "rapidocr":
-                        st.warning(_ocr_msg)
-
-                    # Manual Text is now per-field (see manual_mode.py) rather than
-                    # an all-or-nothing switch, so it no longer forces the other
-                    # sources' *_active flags to False as a block. resolve_active_source
-                    # still picks ONE visual/HTML master source (for whichever
-                    # fields Manual Text left blank) using the same priority order
-                    # as before; Manual Text's own filled-in fields always win
-                    # regardless of which visual source (if any) is "active".
-                    # ---------------------------------------------------------
-                    # Resolve THIS adapt's master sources.
-                    #
-                    # Priority per slot: the adapt's own per-adapt override
-                    # (Per-Adapt Masters card) first, then the global Master
-                    # control. Master JPG / HTML ZIP are re-wrapped in a fresh
-                    # BytesIO every time because PIL and zipfile both consume
-                    # the stream — reusing one uploaded file object across
-                    # several adapts would leave every job after the first
-                    # reading from an exhausted buffer.
-                    # ---------------------------------------------------------
-                    _assign = ext_multi_assignments.get(job["name"])
-
-                    if _assign is not None and _assign.jpg_bytes:
-                        job_master_jpg = _assign.jpg_file()
-                        job_master_jpg_origin = f"per-adapt Master JPG ({_assign.jpg_name})"
-                    elif ext_master_jpg_upload is not None:
-                        job_master_jpg = BytesIO(ext_master_jpg_upload.getvalue())
-                        job_master_jpg_origin = "global Master JPG"
-                    else:
-                        job_master_jpg = None
-                        job_master_jpg_origin = ""
-
-                    if _assign is not None and _assign.html_zip_bytes:
-                        job_master_html_zip = _assign.html_zip_file()
-                        job_master_html_zip_origin = f"per-adapt Master HTML ZIP ({_assign.html_zip_name})"
-                    elif ext_master_html_zip_upload is not None:
-                        job_master_html_zip = BytesIO(ext_master_html_zip_upload.getvalue())
-                        job_master_html_zip_origin = "global Master HTML ZIP"
-                    else:
-                        job_master_html_zip = None
-                        job_master_html_zip_origin = ""
-
-                    if ext_master_pdf_upload is not None:
-                        job_master_pdf = BytesIO(ext_master_pdf_upload.getvalue())
-                    else:
-                        job_master_pdf = None
-
-                    # Which page of the master PDF this adapt uses:
-                    #   1. a page pinned by hand for this adapt
-                    #   2. the page auto-routed from the deck's model sections
-                    #   3. the global "PDF Page Number" box, when set
-                    #   4. None -> master_pdf.py's own single-master auto-detect
-                    _auto_entry = (ext_pdf_auto_map.get(job["name"]) or (None, ""))[0]
-                    if _assign is not None and _assign.pdf_page and _assign.pdf_page_source == "manual":
-                        job_master_pdf_page = int(_assign.pdf_page)
-                        job_master_pdf_origin = f"master PDF page {job_master_pdf_page} (pinned for this adapt)"
-                    elif _auto_entry is not None:
-                        job_master_pdf_page = int(_auto_entry.page_number)
-                        job_master_pdf_origin = (
-                            f"master PDF page {job_master_pdf_page} "
-                            f"(auto-routed to {_auto_entry.model_label})"
-                        )
-                    elif ext_master_pdf_page and ext_master_pdf_page > 0:
-                        job_master_pdf_page = int(ext_master_pdf_page)
-                        job_master_pdf_origin = f"master PDF page {job_master_pdf_page}"
-                    else:
-                        job_master_pdf_page = None
-                        job_master_pdf_origin = "master PDF (auto-detected page)"
-
-                    # Manual Text / Manual Body: per-adapt value wins per FIELD,
-                    # so an adapt can override just its headline and still take
-                    # everything else from the global Manual Text block.
-                    job_manual_master = ext_manual.ManualMasterText(
-                        headline=((_assign.headline if _assign is not None and _assign.headline.strip()
-                                   else ext_manual_headline) or ""),
-                        subheadline=((_assign.subheadline if _assign is not None and _assign.subheadline.strip()
-                                      else ext_manual_subheadline) or ""),
-                        dealer_name=((_assign.dealer_name if _assign is not None and _assign.dealer_name.strip()
-                                      else ext_manual_dealer_name) or ""),
-                        body_text=((_assign.body_text if _assign is not None and _assign.body_text.strip()
-                                    else ext_manual_body_text) or ""),
-                    )
-                    job_body_as_is = ((_assign.body_as_is if _assign is not None and _assign.body_as_is.strip()
-                                       else ext_body_as_is) or "")
-                    job_body_to_be = ((_assign.body_to_be if _assign is not None and _assign.body_to_be.strip()
-                                       else ext_body_to_be) or "")
-
-                    if _assign is not None and _assign.has_any():
-                        st.caption(
-                            "Using this adapt's own Master: "
-                            + ", ".join(_assign.summary_bits() or ["master PDF page routing"])
-                        )
-
-                    ext_sources = ext_priority.MasterSources(
-                        manual_text_active=job_manual_master.is_active(),
-                        master_jpg_active=job_master_jpg is not None,
-                        master_pdf_active=job_master_pdf is not None,
-                        master_html_zip_active=job_master_html_zip is not None,
-                        dealer_dropdown_active=ext_selected_dealer_row is not None,
-                        excel_active=bool(dealer_rows),
-                    )
-                    active_source = ext_priority.resolve_active_source(ext_sources)
-                    # NOTE (was previously shown on-screen via st.caption; moved to a
-                    # code comment per request): ext_priority.explain_priority(ext_sources)
-                    # returns a human-readable string like "Active Master source:
-                    # Manual Text (highest priority available)." — still computed
-                    # below for any future debugging/logging use, just not rendered.
-                    _ext_priority_explanation = ext_priority.explain_priority(ext_sources)
-
-                    # Dealer Name fallback fix: when no Dealer Dropdown selection
-                    # and no Manual Dealer Name is typed, the effective dealer name
-                    # must come from a Master JPG/PDF/HTML ZIP (below, once that
-                    # master's OCR/HTML text is available) — NEVER from `dealer_row`,
-                    # which is only the auto-detected-from-this-email's-own-HTML
-                    # match used for the separate base Dealer Panel QA feature.
-                    # Falling back to `dealer_row` here was a tautology: it validates
-                    # the email's claimed dealer name against that same email's HTML,
-                    # so a genuinely wrong dealer name baked into the HTML would
-                    # always "Pass" since it's being checked against itself.
-                    if ext_selected_dealer_row is not None:
-                        _dropdown_dealer_name = ext_selected_dealer_row.dealer
-                    else:
-                        _dropdown_dealer_name = ""
-
-                    # Build the Master Banner from whichever visual/HTML source is
-                    # active. This now runs whenever a visual/HTML master was
-                    # uploaded — regardless of what active_source says — because
-                    # active_source only reflects ONE top-priority source (e.g.
-                    # "manual_text" if any Manual field is filled), but Manual Text
-                    # is per-field: a Master JPG/PDF/HTML ZIP may still be needed to
-                    # supply Dealer Name (or Headline/Subheadline) for whichever
-                    # fields Manual Text left blank. Priority among the visual/HTML
-                    # uploads themselves still follows Master JPG > Master PDF >
-                    # Master HTML ZIP, same order as priority.py.
-                    ext_master_banner_img = None
-                    ext_master_banner_note = ""
-                    ext_master_html_text = None  # only populated when Master HTML ZIP supplied the banner
-                    try:
-                        if job_master_jpg is not None:
-                            img = ext_master_image.load_image_from_upload(job_master_jpg)
-                            crop_out = ext_master_image.crop_banner_top_to_dear(img, EXT_CFG)
-                            ext_master_banner_img = crop_out.banner_image
-                            ext_master_banner_note = f"Master from {job_master_jpg_origin}. {crop_out.note}"
-                        elif job_master_pdf is not None:
-                            crop_out = ext_master_pdf.get_master_banner_from_pdf(
-                                job_master_pdf, job_master_pdf_page, EXT_CFG)
-                            ext_master_banner_img = crop_out.banner_image
-                            ext_master_banner_note = f"Master from {job_master_pdf_origin}. {crop_out.note}"
-                        elif job_master_html_zip is not None:
-                            mh = ext_master_html_zip.load_master_from_html_zip(job_master_html_zip, EXT_CFG)
-                            ext_master_banner_img = mh.banner_result.image
-                            ext_master_banner_note = f"Master from {job_master_html_zip_origin}. {mh.note}"
-                            ext_master_html_text = mh.html_text
-                    except Exception as e:
-                        ext_master_banner_note = f"Could not build Master Banner: {e}"
-
-                    # -----------------------------------------------------------
-                    # Expected Headline / Subheadline / Dealer Name / Body Text are
-                    # now resolved PER-FIELD (see manual_mode.py):
-                    #   - Any field the user typed into Manual Text always wins for
-                    #     that field, regardless of what a visual master provides.
-                    #   - Any field left blank in Manual Text falls through to the
-                    #     active visual/HTML master source's own OCR/HTML-derived
-                    #     value for that same field, if available.
-                    #   - Dealer Dropdown supplies the dealer name fallback (never
-                    #     the auto-detected `dealer_row` — see note above).
-                    #   - If nothing provides a field, it stays "" and that field's
-                    #     QA row is skipped (WARN "No expected value provided"),
-                    #     same as before.
-                    # -----------------------------------------------------------
-                    master_derived_headline = ""
-                    master_derived_subheadline = ""
-                    master_derived_dealer_name = ""
-                    master_derived_body_text = ""
-                    ext_master_banner_clustered_lines = None
-                    ext_master_ocr_warning = ""
-
-                    # A dealer-name HINT to search for while OCR'ing the Master
-                    # Banner, if one is already known at this point (Dealer
-                    # Dropdown selection, or a typed Manual Dealer Name) — see
-                    # ocr_engine.find_dealer_line() / cluster_lines_by_size()'s
-                    # `expected_dealer_name` param. This does NOT change the
-                    # documented priority order below (dropdown/manual still
-                    # always win as the FINAL effective_dealer_name); it only
-                    # makes the OCR clustering itself smarter at locating the
-                    # correct line on the banner when a Subheadline and Dealer
-                    # Name happen to render at the same font size — which plain
-                    # font-size banding alone cannot always tell apart (see
-                    # ocr_engine.py's cluster_lines_by_size docstring).
-                    _master_dealer_name_hint = (
-                        _dropdown_dealer_name.strip() if _dropdown_dealer_name.strip()
-                        else job_manual_master.dealer_name.strip()
-                    )
-
-                    # Every dealer name this workbook knows about.
-                    #
-                    # The Master creative is routinely built for a DIFFERENT
-                    # dealer than the email under test - a master carrying
-                    # "Bavaria Motors" is used to QA an "Infinity Cars"
-                    # mailer, because only the dealer line changes between
-                    # dealer versions of the same campaign. Passing the whole
-                    # list (not just this email's dealer) lets the Master's
-                    # own dealer line be LOCATED and lifted out of the
-                    # master-derived Headline/Subheadline. Without it, that
-                    # line has no band of its own to fall into, so it gets
-                    # swept into the expected Subheadline ("BMW FUEL
-                    # ADDITIVES. Bavaria Motors") and the email under test is
-                    # then failed for not containing another dealer's name -
-                    # which it must never contain.
-                    #
-                    # This does NOT change which dealer name is validated:
-                    # the effective dealer name still follows the documented
-                    # dropdown > manual > master-derived order below.
-                    _known_dealer_names = [
-                        str(getattr(r, "dealer", "") or "").strip()
-                        for r in dealer_rows
-                        if str(getattr(r, "dealer", "") or "").strip()
-                    ]
-                    _master_dealer_name_candidates = (
-                        ([_master_dealer_name_hint] if _master_dealer_name_hint else [])
-                        + _known_dealer_names
-                    )
-
-                    if ext_master_banner_img is not None:
-                        try:
-                            ext_master_banner_clustered_lines, _master_lines_res = ext_ocr.extract_clustered_text(
-                                ext_master_banner_img, prefer=EXT_OCR_PREFER_KEY,
-                                expected_dealer_name=_master_dealer_name_candidates,
+                        # Headline / Subheadline / Dealer Name on a banner exist
+                        # only as pixels, so every one of those checks depends on
+                        # an OCR engine being installed. When none is, they all
+                        # came back blank and Banner Text QA reported "No expected
+                        # value provided for this field" - which reads like the
+                        # Master was empty rather than like the tool could not
+                        # look at it. Say so plainly instead.
+                        _ocr_ok, _ocr_engine, _ocr_msg = ext_ocr.ocr_status()
+                        if not _ocr_ok:
+                            st.error(
+                                "**Banner OCR engine not found — Headline, Subheadline and "
+                                "Dealer Name cannot be read from the banner.**\n\n" + _ocr_msg
                             )
-                            master_derived_headline = ext_master_banner_clustered_lines.headline_text
-                            master_derived_subheadline = ext_master_banner_clustered_lines.subheadline_text
-                            # `dealer_text` prefers the content-matched dealer
-                            # line (found by searching all OCR'd lines for the
-                            # `_master_dealer_name_hint`'s words, regardless of
-                            # which font-size band it landed in) and only falls
-                            # back to the plain smallest-font-band guess when no
-                            # hint was available or no confident match was
-                            # found — so a Master JPG/PDF/HTML ZIP alone can
-                            # still supply a reliable dealer name for
-                            # validation even when Subheadline and Dealer Name
-                            # share a font size on the banner.
-                            master_derived_dealer_name = ext_master_banner_clustered_lines.dealer_text
-                            if _master_lines_res.warning:
-                                ext_master_ocr_warning = _master_lines_res.warning
-                        except Exception as e:
-                            ext_master_banner_clustered_lines = None
-                            ext_master_ocr_warning = f"Could not OCR the Master Banner for Headline/Subheadline/Dealer Name: {e}"
+                        elif _ocr_engine == "rapidocr":
+                            st.warning(_ocr_msg)
 
-                    if ext_master_html_text:
-                        master_derived_body_text = html_to_visible_text(BeautifulSoup(ext_master_html_text, "html.parser"))
-
-                    expected_headline = job_manual_master.resolve_headline(master_derived_headline)
-                    expected_subheadline = job_manual_master.resolve_subheadline(master_derived_subheadline)
-                    expected_body_text = job_manual_master.resolve_body_text(master_derived_body_text)
-
-                    # Dealer name resolution order (per latest spec):
-                    #   1. Dealer Dropdown selection — if the person explicitly
-                    #      picked a dealer, that ALWAYS wins, even over Manual
-                    #      Dealer Name — the dropdown is the authoritative choice
-                    #      once made. Manual Text / Master JPG/PDF/HTML in that
-                    #      case are only used for Headline/Subheadline/Body Text.
-                    #   2. Manual Dealer Name (if typed, and no dropdown selection).
-                    #   3. Master JPG / Master PDF / Master HTML ZIP — OCR'd
-                    #      dealer-name band from whichever was uploaded (never the
-                    #      auto-detected `dealer_row` — see note above).
-                    #   4. "" — no dealer name available, check is skipped.
-                    if _dropdown_dealer_name:
-                        effective_dealer_name = _dropdown_dealer_name
-                    elif job_manual_master.dealer_name_is_manual():
-                        effective_dealer_name = job_manual_master.dealer_name.strip()
-                    elif master_derived_dealer_name.strip():
-                        effective_dealer_name = master_derived_dealer_name.strip()
-                    else:
-                        effective_dealer_name = ""
-
-                    if ext_master_ocr_warning:
-                        st.caption(f"Master Banner OCR note: {ext_master_ocr_warning}")
-
-                    # Manual Body Comparison (As Is / To Be) always overrides the
-                    # master-derived body text if the user typed a "To Be" value —
-                    # that section is an explicit manual override, unchanged.
-                    if job_body_to_be.strip():
-                        expected_body_text = job_body_to_be
-
-                    if ext_master_banner_note:
-                        st.caption(ext_master_banner_note)
-
-                    # Input banner pixels. A model-folder .zip already contains
-                    # everything needed (index.html + images/), so it is used
-                    # directly; only a bare HTML upload with no images at all
-                    # leaves Banner QA without a source. A fresh BytesIO per job
-                    # because zipfile consumes the stream.
-                    ext_input_zip_for_banner = job.get("images")
-                    ext_input_banner_result = None
-                    _job_zip_bytes = job.get("images_zip_bytes")
-                    try:
-                        if _job_zip_bytes:
-                            ext_input_banner_result = ext_banner_detect.extract_banner_image(
-                                job["html"], BytesIO(_job_zip_bytes), EXT_CFG)
-                        elif isinstance(ext_input_zip_for_banner, dict):
-                            ext_input_banner_result = None
-                            st.caption(
-                                "Banner pixel extraction needs the image files themselves — "
-                                "re-upload this email as a model-folder .zip, or add an images .zip "
-                                "alongside the HTML, to enable Banner QA."
-                            )
-                        elif ext_input_zip_for_banner is not None:
-                            ext_input_banner_result = ext_banner_detect.extract_banner_image(
-                                job["html"], ext_input_zip_for_banner, EXT_CFG)
-                    except Exception as e:
-                        st.caption(f"Could not extract input banner: {e}")
-
-                    ext_input_banner_img = ext_input_banner_result.image if ext_input_banner_result else None
-
-                    ext_input_banner_ocr_text = ""
-                    ext_input_banner_engine = "none"
-                    ext_input_banner_clustered_lines = None
-                    if ext_input_banner_img is not None:
-                        ocr_res = ext_ocr.extract_text(ext_input_banner_img, prefer=EXT_OCR_PREFER_KEY)
-                        ext_input_banner_ocr_text = ocr_res.text
-                        ext_input_banner_engine = ocr_res.engine_used
-                        if ocr_res.warning:
-                            st.caption(f"OCR note: {ocr_res.warning}")
-                        # Also run structured line extraction so Headline / Subheadline
-                        # can be matched against their own font-size band instead of
-                        # the whole banner text blob (fixes headline+subheadline
-                        # being treated as one combined string).
+                        # Manual Text is now per-field (see manual_mode.py) rather than
+                        # an all-or-nothing switch, so it no longer forces the other
+                        # sources' *_active flags to False as a block. resolve_active_source
+                        # still picks ONE visual/HTML master source (for whichever
+                        # fields Manual Text left blank) using the same priority order
+                        # as before; Manual Text's own filled-in fields always win
+                        # regardless of which visual source (if any) is "active".
+                        # ---------------------------------------------------------
+                        # Resolve THIS adapt's master sources.
                         #
-                        # `expected_dealer_name` is passed here too (same hint
-                        # already resolved above as `effective_dealer_name` —
-                        # dropdown > manual > master-derived, per the documented
-                        # priority order) so the Dealer Name line is located by
-                        # content-matching its words across ALL font bands, not
-                        # just whichever band plain font-size clustering happened
-                        # to place it in. This matters because a banner's
-                        # Subheadline and Dealer Name commonly render at the
-                        # SAME font size (see ocr_engine.py's
-                        # cluster_lines_by_size docstring) — without this hint,
-                        # the two would still get merged into a single band
-                        # here, relying entirely on banner_text_qa.py's own
-                        # fallback re-search to recover the Dealer Name. Passing
-                        # it here fixes it at the source as well, so both
-                        # layers agree and neither is a single point of failure.
-                        try:
-                            ext_input_banner_clustered_lines, _lines_res = ext_ocr.extract_clustered_text(
-                                ext_input_banner_img, prefer=EXT_OCR_PREFER_KEY,
-                                expected_dealer_name=effective_dealer_name,
-                            )
-                        except Exception:
-                            ext_input_banner_clustered_lines = None
+                        # Priority per slot: the adapt's own per-adapt override
+                        # (Per-Adapt Masters card) first, then the global Master
+                        # control. Master JPG / HTML ZIP are re-wrapped in a fresh
+                        # BytesIO every time because PIL and zipfile both consume
+                        # the stream — reusing one uploaded file object across
+                        # several adapts would leave every job after the first
+                        # reading from an exhausted buffer.
+                        # ---------------------------------------------------------
+                        _assign = ext_multi_assignments.get(job["name"])
 
-                    ext_html_body_text = html_to_visible_text(BeautifulSoup(job["html"], "html.parser"))
-                    # Dealer-in-Body must only look at the greeting/body-copy
-                    # portion (Dear ... up to the "BMW <Dealer>" sign-off line),
-                    # NOT the dealer panel further down — that's already QA'd
-                    # separately against the Excel sheet in the main report above.
-                    ext_html_body_greeting_slice = extract_body_greeting_slice(ext_html_body_text, effective_dealer_name)
-
-                    ext_tab_names = ["Body QA", "Banner QA", "Summary"]
-                    ext_tabs = st.tabs(ext_tab_names)
-                    ext_all_module_results: List[ExtModuleResult] = []
-
-                    with ext_tabs[0]:
-                        body_dealer_result = ext_body_qa.run_body_dealer_qa(
-                            ext_check_dealer_in_body, effective_dealer_name, ext_html_body_greeting_slice
-                        )
-                        ext_results_ui.render_module_result(body_dealer_result, table_key=f"adv_body_dealer_{job_idx}")
-                        st.divider()
-                        manual_body_result = ext_body_qa.run_manual_body_comparison(
-                            job_body_as_is if job_body_as_is.strip() else expected_body_text,
-                            job_body_to_be if job_body_to_be.strip() else expected_body_text,
-                            ext_html_body_greeting_slice,
-                        )
-                        ext_results_ui.render_module_result(manual_body_result, table_key=f"adv_manual_body_{job_idx}")
-                        ext_all_module_results.extend([body_dealer_result, manual_body_result])
-
-                    with ext_tabs[1]:
-                        if ext_input_banner_img is None:
-                            st.info(
-                                "No input banner image available — this email's HTML has no usable "
-                                "<img> banner, or its image files were not supplied. Upload the email "
-                                "as a model-folder .zip (index.html + images/) to enable this tab."
-                            )
+                        if _assign is not None and _assign.jpg_bytes:
+                            job_master_jpg = _assign.jpg_file()
+                            job_master_jpg_origin = f"per-adapt Master JPG ({_assign.jpg_name})"
+                        elif ext_master_jpg_upload is not None:
+                            job_master_jpg = BytesIO(ext_master_jpg_upload.getvalue())
+                            job_master_jpg_origin = "global Master JPG"
                         else:
-                            # expected_headline / expected_subheadline were already
-                            # resolved above from whichever Master source is active
-                            # (Manual Text, or OCR'd from Master JPG/PDF/HTML-ZIP
-                            # banner) — not Manual Text Mode only.
-                            banner_text_result = ext_banner_text_qa.run_banner_text_qa(
-                                expected_headline, expected_subheadline, effective_dealer_name,
-                                ext_input_banner_ocr_text, EXT_CFG,
-                                clustered_lines=ext_input_banner_clustered_lines,
-                                # RapidOCR merges words on tight display type;
-                                # Tesseract/PaddleOCR do not, and keep the
-                                # original strict spacing comparison.
-                                space_insensitive=(ext_input_banner_engine == "rapidocr"),
-                                # Lets Banner Text QA recognise (and strip) a
-                                # trailing dealer name belonging to ANOTHER
-                                # dealer, which is what leaks into the
-                                # expected Headline/Subheadline when the
-                                # Master creative was built for a different
-                                # dealer than this email. Second safety net
-                                # for the same problem the candidate list
-                                # above fixes at the source.
-                                known_dealer_names=_known_dealer_names,
-                            )
-                            ext_results_ui.render_module_result(banner_text_result, table_key=f"adv_banner_text_{job_idx}")
-                            ext_all_module_results.append(banner_text_result)
+                            job_master_jpg = None
+                            job_master_jpg_origin = ""
 
+                        if _assign is not None and _assign.html_zip_bytes:
+                            job_master_html_zip = _assign.html_zip_file()
+                            job_master_html_zip_origin = f"per-adapt Master HTML ZIP ({_assign.html_zip_name})"
+                        elif ext_master_html_zip_upload is not None:
+                            job_master_html_zip = BytesIO(ext_master_html_zip_upload.getvalue())
+                            job_master_html_zip_origin = "global Master HTML ZIP"
+                        else:
+                            job_master_html_zip = None
+                            job_master_html_zip_origin = ""
+
+                        if ext_master_pdf_upload is not None:
+                            job_master_pdf = BytesIO(ext_master_pdf_upload.getvalue())
+                        else:
+                            job_master_pdf = None
+
+                        # Which page of the master PDF this adapt uses:
+                        #   1. a page pinned by hand for this adapt
+                        #   2. the page auto-routed from the deck's model sections
+                        #   3. the global "PDF Page Number" box, when set
+                        #   4. None -> master_pdf.py's own single-master auto-detect
+                        _auto_entry = (ext_pdf_auto_map.get(job["name"]) or (None, ""))[0]
+                        if _assign is not None and _assign.pdf_page and _assign.pdf_page_source == "manual":
+                            job_master_pdf_page = int(_assign.pdf_page)
+                            job_master_pdf_origin = f"master PDF page {job_master_pdf_page} (pinned for this adapt)"
+                        elif _auto_entry is not None:
+                            job_master_pdf_page = int(_auto_entry.page_number)
+                            job_master_pdf_origin = (
+                                f"master PDF page {job_master_pdf_page} "
+                                f"(auto-routed to {_auto_entry.model_label})"
+                            )
+                        elif ext_master_pdf_page and ext_master_pdf_page > 0:
+                            job_master_pdf_page = int(ext_master_pdf_page)
+                            job_master_pdf_origin = f"master PDF page {job_master_pdf_page}"
+                        else:
+                            job_master_pdf_page = None
+                            job_master_pdf_origin = "master PDF (auto-detected page)"
+
+                        # Manual Text / Manual Body: per-adapt value wins per FIELD,
+                        # so an adapt can override just its headline and still take
+                        # everything else from the global Manual Text block.
+                        job_manual_master = ext_manual.ManualMasterText(
+                            headline=((_assign.headline if _assign is not None and _assign.headline.strip()
+                                       else ext_manual_headline) or ""),
+                            subheadline=((_assign.subheadline if _assign is not None and _assign.subheadline.strip()
+                                          else ext_manual_subheadline) or ""),
+                            dealer_name=((_assign.dealer_name if _assign is not None and _assign.dealer_name.strip()
+                                          else ext_manual_dealer_name) or ""),
+                            body_text=((_assign.body_text if _assign is not None and _assign.body_text.strip()
+                                        else ext_manual_body_text) or ""),
+                        )
+                        job_body_as_is = ((_assign.body_as_is if _assign is not None and _assign.body_as_is.strip()
+                                           else ext_body_as_is) or "")
+                        job_body_to_be = ((_assign.body_to_be if _assign is not None and _assign.body_to_be.strip()
+                                           else ext_body_to_be) or "")
+
+                        if _assign is not None and _assign.has_any():
+                            st.caption(
+                                "Using this adapt's own Master: "
+                                + ", ".join(_assign.summary_bits() or ["master PDF page routing"])
+                            )
+
+                        ext_sources = ext_priority.MasterSources(
+                            manual_text_active=job_manual_master.is_active(),
+                            master_jpg_active=job_master_jpg is not None,
+                            master_pdf_active=job_master_pdf is not None,
+                            master_html_zip_active=job_master_html_zip is not None,
+                            dealer_dropdown_active=ext_selected_dealer_row is not None,
+                            excel_active=bool(dealer_rows),
+                        )
+                        active_source = ext_priority.resolve_active_source(ext_sources)
+                        # NOTE (was previously shown on-screen via st.caption; moved to a
+                        # code comment per request): ext_priority.explain_priority(ext_sources)
+                        # returns a human-readable string like "Active Master source:
+                        # Manual Text (highest priority available)." — still computed
+                        # below for any future debugging/logging use, just not rendered.
+                        _ext_priority_explanation = ext_priority.explain_priority(ext_sources)
+
+                        # Dealer Name fallback fix: when no Dealer Dropdown selection
+                        # and no Manual Dealer Name is typed, the effective dealer name
+                        # must come from a Master JPG/PDF/HTML ZIP (below, once that
+                        # master's OCR/HTML text is available) — NEVER from `dealer_row`,
+                        # which is only the auto-detected-from-this-email's-own-HTML
+                        # match used for the separate base Dealer Panel QA feature.
+                        # Falling back to `dealer_row` here was a tautology: it validates
+                        # the email's claimed dealer name against that same email's HTML,
+                        # so a genuinely wrong dealer name baked into the HTML would
+                        # always "Pass" since it's being checked against itself.
+                        if ext_selected_dealer_row is not None:
+                            _dropdown_dealer_name = ext_selected_dealer_row.dealer
+                        else:
+                            _dropdown_dealer_name = ""
+
+                        # Build the Master Banner from whichever visual/HTML source is
+                        # active. This now runs whenever a visual/HTML master was
+                        # uploaded — regardless of what active_source says — because
+                        # active_source only reflects ONE top-priority source (e.g.
+                        # "manual_text" if any Manual field is filled), but Manual Text
+                        # is per-field: a Master JPG/PDF/HTML ZIP may still be needed to
+                        # supply Dealer Name (or Headline/Subheadline) for whichever
+                        # fields Manual Text left blank. Priority among the visual/HTML
+                        # uploads themselves still follows Master JPG > Master PDF >
+                        # Master HTML ZIP, same order as priority.py.
+                        ext_master_banner_img = None
+                        ext_master_banner_note = ""
+                        ext_master_html_text = None  # only populated when Master HTML ZIP supplied the banner
+                        try:
+                            if job_master_jpg is not None:
+                                img = ext_master_image.load_image_from_upload(job_master_jpg)
+                                crop_out = ext_master_image.crop_banner_top_to_dear(img, EXT_CFG)
+                                ext_master_banner_img = crop_out.banner_image
+                                ext_master_banner_note = f"Master from {job_master_jpg_origin}. {crop_out.note}"
+                            elif job_master_pdf is not None:
+                                crop_out = ext_master_pdf.get_master_banner_from_pdf(
+                                    job_master_pdf, job_master_pdf_page, EXT_CFG)
+                                ext_master_banner_img = crop_out.banner_image
+                                ext_master_banner_note = f"Master from {job_master_pdf_origin}. {crop_out.note}"
+                            elif job_master_html_zip is not None:
+                                mh = ext_master_html_zip.load_master_from_html_zip(job_master_html_zip, EXT_CFG)
+                                ext_master_banner_img = mh.banner_result.image
+                                ext_master_banner_note = f"Master from {job_master_html_zip_origin}. {mh.note}"
+                                ext_master_html_text = mh.html_text
+                        except Exception as e:
+                            ext_master_banner_note = f"Could not build Master Banner: {e}"
+
+                        # -----------------------------------------------------------
+                        # Expected Headline / Subheadline / Dealer Name / Body Text are
+                        # now resolved PER-FIELD (see manual_mode.py):
+                        #   - Any field the user typed into Manual Text always wins for
+                        #     that field, regardless of what a visual master provides.
+                        #   - Any field left blank in Manual Text falls through to the
+                        #     active visual/HTML master source's own OCR/HTML-derived
+                        #     value for that same field, if available.
+                        #   - Dealer Dropdown supplies the dealer name fallback (never
+                        #     the auto-detected `dealer_row` — see note above).
+                        #   - If nothing provides a field, it stays "" and that field's
+                        #     QA row is skipped (WARN "No expected value provided"),
+                        #     same as before.
+                        # -----------------------------------------------------------
+                        master_derived_headline = ""
+                        master_derived_subheadline = ""
+                        master_derived_dealer_name = ""
+                        master_derived_body_text = ""
+                        ext_master_banner_clustered_lines = None
+                        ext_master_ocr_warning = ""
+
+                        # A dealer-name HINT to search for while OCR'ing the Master
+                        # Banner, if one is already known at this point (Dealer
+                        # Dropdown selection, or a typed Manual Dealer Name) — see
+                        # ocr_engine.find_dealer_line() / cluster_lines_by_size()'s
+                        # `expected_dealer_name` param. This does NOT change the
+                        # documented priority order below (dropdown/manual still
+                        # always win as the FINAL effective_dealer_name); it only
+                        # makes the OCR clustering itself smarter at locating the
+                        # correct line on the banner when a Subheadline and Dealer
+                        # Name happen to render at the same font size — which plain
+                        # font-size banding alone cannot always tell apart (see
+                        # ocr_engine.py's cluster_lines_by_size docstring).
+                        _master_dealer_name_hint = (
+                            _dropdown_dealer_name.strip() if _dropdown_dealer_name.strip()
+                            else job_manual_master.dealer_name.strip()
+                        )
+
+                        # Every dealer name this workbook knows about.
+                        #
+                        # The Master creative is routinely built for a DIFFERENT
+                        # dealer than the email under test - a master carrying
+                        # "Bavaria Motors" is used to QA an "Infinity Cars"
+                        # mailer, because only the dealer line changes between
+                        # dealer versions of the same campaign. Passing the whole
+                        # list (not just this email's dealer) lets the Master's
+                        # own dealer line be LOCATED and lifted out of the
+                        # master-derived Headline/Subheadline. Without it, that
+                        # line has no band of its own to fall into, so it gets
+                        # swept into the expected Subheadline ("BMW FUEL
+                        # ADDITIVES. Bavaria Motors") and the email under test is
+                        # then failed for not containing another dealer's name -
+                        # which it must never contain.
+                        #
+                        # This does NOT change which dealer name is validated:
+                        # the effective dealer name still follows the documented
+                        # dropdown > manual > master-derived order below.
+                        _known_dealer_names = [
+                            str(getattr(r, "dealer", "") or "").strip()
+                            for r in dealer_rows
+                            if str(getattr(r, "dealer", "") or "").strip()
+                        ]
+                        _master_dealer_name_candidates = (
+                            ([_master_dealer_name_hint] if _master_dealer_name_hint else [])
+                            + _known_dealer_names
+                        )
+
+                        if ext_master_banner_img is not None:
+                            try:
+                                ext_master_banner_clustered_lines, _master_lines_res = ext_ocr.extract_clustered_text(
+                                    ext_master_banner_img, prefer=EXT_OCR_PREFER_KEY,
+                                    expected_dealer_name=_master_dealer_name_candidates,
+                                )
+                                master_derived_headline = ext_master_banner_clustered_lines.headline_text
+                                master_derived_subheadline = ext_master_banner_clustered_lines.subheadline_text
+                                # `dealer_text` prefers the content-matched dealer
+                                # line (found by searching all OCR'd lines for the
+                                # `_master_dealer_name_hint`'s words, regardless of
+                                # which font-size band it landed in) and only falls
+                                # back to the plain smallest-font-band guess when no
+                                # hint was available or no confident match was
+                                # found — so a Master JPG/PDF/HTML ZIP alone can
+                                # still supply a reliable dealer name for
+                                # validation even when Subheadline and Dealer Name
+                                # share a font size on the banner.
+                                master_derived_dealer_name = ext_master_banner_clustered_lines.dealer_text
+                                if _master_lines_res.warning:
+                                    ext_master_ocr_warning = _master_lines_res.warning
+                            except Exception as e:
+                                ext_master_banner_clustered_lines = None
+                                ext_master_ocr_warning = f"Could not OCR the Master Banner for Headline/Subheadline/Dealer Name: {e}"
+
+                        if ext_master_html_text:
+                            master_derived_body_text = html_to_visible_text(BeautifulSoup(ext_master_html_text, "html.parser"))
+
+                        expected_headline = job_manual_master.resolve_headline(master_derived_headline)
+                        expected_subheadline = job_manual_master.resolve_subheadline(master_derived_subheadline)
+                        expected_body_text = job_manual_master.resolve_body_text(master_derived_body_text)
+
+                        # Dealer name resolution order (per latest spec):
+                        #   1. Dealer Dropdown selection — if the person explicitly
+                        #      picked a dealer, that ALWAYS wins, even over Manual
+                        #      Dealer Name — the dropdown is the authoritative choice
+                        #      once made. Manual Text / Master JPG/PDF/HTML in that
+                        #      case are only used for Headline/Subheadline/Body Text.
+                        #   2. Manual Dealer Name (if typed, and no dropdown selection).
+                        #   3. Master JPG / Master PDF / Master HTML ZIP — OCR'd
+                        #      dealer-name band from whichever was uploaded (never the
+                        #      auto-detected `dealer_row` — see note above).
+                        #   4. "" — no dealer name available, check is skipped.
+                        if _dropdown_dealer_name:
+                            effective_dealer_name = _dropdown_dealer_name
+                        elif job_manual_master.dealer_name_is_manual():
+                            effective_dealer_name = job_manual_master.dealer_name.strip()
+                        elif master_derived_dealer_name.strip():
+                            effective_dealer_name = master_derived_dealer_name.strip()
+                        else:
+                            effective_dealer_name = ""
+
+                        if ext_master_ocr_warning:
+                            st.caption(f"Master Banner OCR note: {ext_master_ocr_warning}")
+
+                        # Manual Body Comparison (As Is / To Be) always overrides the
+                        # master-derived body text if the user typed a "To Be" value —
+                        # that section is an explicit manual override, unchanged.
+                        if job_body_to_be.strip():
+                            expected_body_text = job_body_to_be
+
+                        if ext_master_banner_note:
+                            st.caption(ext_master_banner_note)
+
+                        # Input banner pixels. A model-folder .zip already contains
+                        # everything needed (index.html + images/), so it is used
+                        # directly; only a bare HTML upload with no images at all
+                        # leaves Banner QA without a source. A fresh BytesIO per job
+                        # because zipfile consumes the stream.
+                        ext_input_zip_for_banner = job.get("images")
+                        ext_input_banner_result = None
+                        _job_zip_bytes = job.get("images_zip_bytes")
+                        try:
+                            if _job_zip_bytes:
+                                ext_input_banner_result = ext_banner_detect.extract_banner_image(
+                                    job["html"], BytesIO(_job_zip_bytes), EXT_CFG)
+                            elif isinstance(ext_input_zip_for_banner, dict):
+                                ext_input_banner_result = None
+                                st.caption(
+                                    "Banner pixel extraction needs the image files themselves — "
+                                    "re-upload this email as a model-folder .zip, or add an images .zip "
+                                    "alongside the HTML, to enable Banner QA."
+                                )
+                            elif ext_input_zip_for_banner is not None:
+                                ext_input_banner_result = ext_banner_detect.extract_banner_image(
+                                    job["html"], ext_input_zip_for_banner, EXT_CFG)
+                        except Exception as e:
+                            st.caption(f"Could not extract input banner: {e}")
+
+                        ext_input_banner_img = ext_input_banner_result.image if ext_input_banner_result else None
+
+                        ext_input_banner_ocr_text = ""
+                        ext_input_banner_engine = "none"
+                        ext_input_banner_clustered_lines = None
+                        if ext_input_banner_img is not None:
+                            ocr_res = ext_ocr.extract_text(ext_input_banner_img, prefer=EXT_OCR_PREFER_KEY)
+                            ext_input_banner_ocr_text = ocr_res.text
+                            ext_input_banner_engine = ocr_res.engine_used
+                            if ocr_res.warning:
+                                st.caption(f"OCR note: {ocr_res.warning}")
+                            # Also run structured line extraction so Headline / Subheadline
+                            # can be matched against their own font-size band instead of
+                            # the whole banner text blob (fixes headline+subheadline
+                            # being treated as one combined string).
+                            #
+                            # `expected_dealer_name` is passed here too (same hint
+                            # already resolved above as `effective_dealer_name` —
+                            # dropdown > manual > master-derived, per the documented
+                            # priority order) so the Dealer Name line is located by
+                            # content-matching its words across ALL font bands, not
+                            # just whichever band plain font-size clustering happened
+                            # to place it in. This matters because a banner's
+                            # Subheadline and Dealer Name commonly render at the
+                            # SAME font size (see ocr_engine.py's
+                            # cluster_lines_by_size docstring) — without this hint,
+                            # the two would still get merged into a single band
+                            # here, relying entirely on banner_text_qa.py's own
+                            # fallback re-search to recover the Dealer Name. Passing
+                            # it here fixes it at the source as well, so both
+                            # layers agree and neither is a single point of failure.
+                            try:
+                                ext_input_banner_clustered_lines, _lines_res = ext_ocr.extract_clustered_text(
+                                    ext_input_banner_img, prefer=EXT_OCR_PREFER_KEY,
+                                    expected_dealer_name=effective_dealer_name,
+                                )
+                            except Exception:
+                                ext_input_banner_clustered_lines = None
+
+                        ext_html_body_text = html_to_visible_text(BeautifulSoup(job["html"], "html.parser"))
+                        # Dealer-in-Body must only look at the greeting/body-copy
+                        # portion (Dear ... up to the "BMW <Dealer>" sign-off line),
+                        # NOT the dealer panel further down — that's already QA'd
+                        # separately against the Excel sheet in the main report above.
+                        ext_html_body_greeting_slice = extract_body_greeting_slice(ext_html_body_text, effective_dealer_name)
+
+                        ext_tab_names = ["Body QA", "Banner QA", "Summary"]
+                        ext_tabs = st.tabs(ext_tab_names)
+                        ext_all_module_results: List[ExtModuleResult] = []
+
+                        with ext_tabs[0]:
+                            body_dealer_result = ext_body_qa.run_body_dealer_qa(
+                                ext_check_dealer_in_body, effective_dealer_name, ext_html_body_greeting_slice
+                            )
+                            ext_results_ui.render_module_result(body_dealer_result, table_key=f"adv_body_dealer_{job_idx}")
                             st.divider()
-                            dealer_banner_result = ext_dealer.run_dealer_name_validation(
-                                dealer_name=effective_dealer_name,
-                                check_in_banner=ext_check_dealer_in_banner,
-                                check_in_body=False,
-                                banner_ocr_text=ext_input_banner_ocr_text,
-                                body_text=None,
+                            manual_body_result = ext_body_qa.run_manual_body_comparison(
+                                job_body_as_is if job_body_as_is.strip() else expected_body_text,
+                                job_body_to_be if job_body_to_be.strip() else expected_body_text,
+                                ext_html_body_greeting_slice,
                             )
-                            ext_results_ui.render_module_result(dealer_banner_result, table_key=f"adv_dealer_banner_{job_idx}")
-                            ext_all_module_results.append(dealer_banner_result)
+                            ext_results_ui.render_module_result(manual_body_result, table_key=f"adv_manual_body_{job_idx}")
+                            ext_all_module_results.extend([body_dealer_result, manual_body_result])
 
-                    with ext_tabs[2]:
-                        ext_results_ui.render_summary(ext_all_module_results, table_key=f"adv_summary_{job_idx}")
+                        with ext_tabs[1]:
+                            if ext_input_banner_img is None:
+                                st.info(
+                                    "No input banner image available — this email's HTML has no usable "
+                                    "<img> banner, or its image files were not supplied. Upload the email "
+                                    "as a model-folder .zip (index.html + images/) to enable this tab."
+                                )
+                            else:
+                                # expected_headline / expected_subheadline were already
+                                # resolved above from whichever Master source is active
+                                # (Manual Text, or OCR'd from Master JPG/PDF/HTML-ZIP
+                                # banner) — not Manual Text Mode only.
+                                banner_text_result = ext_banner_text_qa.run_banner_text_qa(
+                                    expected_headline, expected_subheadline, effective_dealer_name,
+                                    ext_input_banner_ocr_text, EXT_CFG,
+                                    clustered_lines=ext_input_banner_clustered_lines,
+                                    # RapidOCR merges words on tight display type;
+                                    # Tesseract/PaddleOCR do not, and keep the
+                                    # original strict spacing comparison.
+                                    space_insensitive=(ext_input_banner_engine == "rapidocr"),
+                                    # Lets Banner Text QA recognise (and strip) a
+                                    # trailing dealer name belonging to ANOTHER
+                                    # dealer, which is what leaks into the
+                                    # expected Headline/Subheadline when the
+                                    # Master creative was built for a different
+                                    # dealer than this email. Second safety net
+                                    # for the same problem the candidate list
+                                    # above fixes at the source.
+                                    known_dealer_names=_known_dealer_names,
+                                )
+                                ext_results_ui.render_module_result(banner_text_result, table_key=f"adv_banner_text_{job_idx}")
+                                ext_all_module_results.append(banner_text_result)
 
-                    ext_job_report.advanced_module_results = ext_all_module_results
-                    if effective_dealer_name:
-                        ext_job_report.dealer = effective_dealer_name
+                                st.divider()
+                                dealer_banner_result = ext_dealer.run_dealer_name_validation(
+                                    dealer_name=effective_dealer_name,
+                                    check_in_banner=ext_check_dealer_in_banner,
+                                    check_in_body=False,
+                                    banner_ocr_text=ext_input_banner_ocr_text,
+                                    body_text=None,
+                                )
+                                ext_results_ui.render_module_result(dealer_banner_result, table_key=f"adv_dealer_banner_{job_idx}")
+                                ext_all_module_results.append(dealer_banner_result)
 
-if run and "ext_report_jobs" in dir() and ext_report_jobs:
-    st.divider()
-    with ext_theme.section("report", "Excel Report"):
-        st.subheader("Consolidated Excel QA Report")
-        st.caption(
-            "One professionally formatted workbook covering every email/model run above — "
-            "Overview sheet plus per-email Content, Style, and (if enabled) Advanced QA sheets."
-        )
-        ext_workbook_bytes = ext_excel_report.build_qa_workbook(ext_report_jobs)
-        st.download_button(
-            "📊 Download Full QA Report (Excel)",
-            data=ext_workbook_bytes,
-            file_name="dealer_panel_qa_report.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            key="ext_download_full_excel_report",
-        )
+                        with ext_tabs[2]:
+                            ext_results_ui.render_summary(ext_all_module_results, table_key=f"adv_summary_{job_idx}")
 
-if run and "ext_theme_results_group_opened" in dir():
-    ext_theme_results_group.__exit__(None, None, None)
+                        ext_job_report.advanced_module_results = ext_all_module_results
+                        if effective_dealer_name:
+                            ext_job_report.dealer = effective_dealer_name
+
+    if run and "ext_report_jobs" in dir() and ext_report_jobs:
+        with ext_theme.section(
+            "report", "Consolidated Excel QA Report",
+            "One workbook covering every email in this run — Overview plus per-email "
+            "Content, Style and (when enabled) Advanced QA sheets.",
+            right_html=ext_theme.chip(f"{len(ext_report_jobs)} email(s)", "brand", "file"),
+        ):
+            ext_workbook_bytes = ext_excel_report.build_qa_workbook(ext_report_jobs)
+            st.download_button(
+                "Download full QA report (Excel)",
+                data=ext_workbook_bytes,
+                file_name="dealer_panel_qa_report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="ext_download_full_excel_report",
+            )
+
+    if run and "ext_theme_results_group_opened" in dir():
+        ext_theme_results_group.__exit__(None, None, None)

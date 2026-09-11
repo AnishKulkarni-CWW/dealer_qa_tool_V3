@@ -1,11 +1,15 @@
-# NOTE ON LOCATION
-# ----------------
-# Streamlit only reads this file from `.streamlit/config.toml` (relative to
-# the working directory the app is launched from) or `~/.streamlit/config.toml`.
-# A `config.toml` sitting at the repo root is never read — run_app.py builds
-# a path to it but doesn't actually pass it to the CLI, so on Streamlit
-# Community Cloud the theme block below would have been ignored entirely
-# and the selected radio dots would render in Streamlit's default red.
+# THIS is the file Streamlit actually reads.
+#
+# Streamlit loads its config from `.streamlit/config.toml` relative to the
+# working directory the app is launched from (or from
+# `~/.streamlit/config.toml`). The copy at the repo root is NEVER read by
+# Streamlit itself — it exists because omniqa.spec bundles it into the
+# frozen desktop build — so before this file existed, the whole [theme]
+# block was dead: Streamlit Community Cloud fell back to its stock
+# palette and painted the selected radio dot, checked boxes and focus
+# rings in its default red instead of the product blue.
+#
+# Keep this file and the root config.toml identical.
 
 [server]
 # Streamlit Community Cloud gives the container roughly 2.7 GB of RAM in
