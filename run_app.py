@@ -126,10 +126,20 @@ def main() -> None:
 
     base_path = _get_base_path()
     app_script = str(base_path / "app.py")
-    config_toml = str(base_path / "config.toml")
 
-    # Build the streamlit CLI command.
-    # We call the streamlit module directly so it works inside a frozen binary.
+    # Streamlit only reads a config file from `.streamlit/config.toml`
+    # relative to the CURRENT WORKING DIRECTORY (or from the user's home
+    # directory). Launched from a desktop shortcut or a frozen binary the
+    # working directory is whatever the shell happened to be in, so the
+    # bundled config may never be found — which used to leave the app
+    # running on Streamlit's stock palette, painting selected radio dots,
+    # checked boxes and focus rings in its default red instead of the
+    # product blue.
+    #
+    # Passing the theme on the command line removes that dependency
+    # entirely: CLI flags outrank every config file, so the palette is
+    # correct no matter where the app is started from. The values below
+    # are the same ones in .streamlit/config.toml — keep the two in step.
     cmd = [
         sys.executable,
         "-m", "streamlit",
@@ -142,6 +152,11 @@ def main() -> None:
         "--server.maxUploadSize", "5120",
         "--server.maxMessageSize", "5120",
         "--server.enableXsrfProtection", "false",
+        "--theme.base", "light",
+        "--theme.primaryColor", "#1C69D4",
+        "--theme.backgroundColor", "#F4F7FC",
+        "--theme.secondaryBackgroundColor", "#FFFFFF",
+        "--theme.textColor", "#0F1B2D",
     ]
 
     print(f"[OMNIQA] Launching: {' '.join(cmd)}")
