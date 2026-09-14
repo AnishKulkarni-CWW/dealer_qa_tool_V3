@@ -1,8 +1,7 @@
 """Decorative inline SVG artwork (hero scene + sidebar watermark).
 
 The design reference puts a car photographed against a mountain range
-behind the welcome panel and a second car at the foot of the navigation
-rail. Shipping actual photography would mean either bundling large binary
+behind the welcome panel. Shipping actual photography would mean either bundling large binary
 assets into the repo or fetching them over the network at render time —
 and the network is exactly what this tool cannot depend on (it is run
 from locked-down office machines and from a Streamlit Community Cloud
@@ -105,25 +104,5 @@ def hero_scene(uid: str = "dqhero") -> str:
 {_suv(body="#3E6EAE", body_dark="#1F477E", glass="#E7F0FB", trim="#16365F", tyre="#1B3557")}
 </g>
 <rect width="1200" height="420" fill="url(#{uid}-fade)"/>
-</svg>
-"""
-
-
-def sidebar_watermark(uid: str = "dqside") -> str:
-    """The car that anchors the bottom of the navigation rail."""
-    return f"""
-<svg class="dq-side-art" viewBox="0 0 620 300" preserveAspectRatio="xMidYMax meet" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
-<defs>
-<linearGradient id="{uid}-glow" x1="0" y1="0" x2="0" y2="1">
-<stop offset="0%" stop-color="#3C6FB4" stop-opacity="0"/>
-<stop offset="100%" stop-color="#4E86CE" stop-opacity=".30"/>
-</linearGradient>
-</defs>
-<rect width="620" height="300" fill="url(#{uid}-glow)"/>
-<path d="M0 214 116 146l90 48 104-56 106 66 110-50 94 44v100H0z" fill="#5E8CC8" opacity=".22"/>
-<path d="M0 262h620" stroke="#7FA9DC" stroke-width="2" opacity=".35"/>
-<g transform="translate(50 40)">
-{_suv(body="#6C97D2", body_dark="#3E6BA6", glass="#D8E7F8", trim="#33608F", tyre="#2C4E7C", opacity=0.92)}
-</g>
 </svg>
 """
