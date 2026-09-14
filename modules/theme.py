@@ -154,7 +154,10 @@ def kind_accent(name: str) -> str:
 # CSS
 # --------------------------------------------------------------------------
 
-_NAV_ICONS = ["home", "check-square", "settings", "help"]
+# One entry per nav row, in the order render_sidebar is called with.
+# "QA Validation" was removed: it rendered the identical workflow to Home
+# minus the welcome panel, so it was a second door into the same room.
+_NAV_ICONS = ["home", "settings", "help"]
 
 
 def _nav_icon_rules() -> str:
@@ -183,8 +186,16 @@ def _nav_icon_rules() -> str:
 
 
 def _css(density: str = "comfortable") -> str:
-    row_pad = ".45rem .7rem" if density == "compact" else ".68rem .85rem"
-    font_size = ".8rem" if density == "compact" else ".845rem"
+    # The two densities have to be far enough apart to be worth a control:
+    # an earlier pass differed by under 4px a row, which read on screen as
+    # "this setting does nothing". Compact now drops the row height by
+    # roughly a third and takes the type down with it.
+    compact = density == "compact"
+    row_pad = ".3rem .6rem" if compact else ".68rem .85rem"
+    font_size = ".77rem" if compact else ".845rem"
+    row_line = "1.35" if compact else "1.55"
+    head_pad = ".38rem .6rem" if compact else ".6rem .85rem"
+    status_pad = ".1rem .45rem" if compact else ".2rem .55rem"
 
     return f"""
 <style>
@@ -343,30 +354,28 @@ section[data-testid="stSidebar"] div[role="radiogroup"] > label[data-selected="t
 }}
 {_nav_icon_rules()}
 
-.dq-side-foot {{
-    margin-top:1.1rem; padding:.9rem .35rem 0 .35rem;
-    border-top:1px solid rgba(255,255,255,.09);
-    position:relative; z-index:1;
+/* The rail's lower half: a rule, a group label, and the view switches
+   app.py puts there through sidebar_prefs(). */
+.dq-side-prefs {{
+    margin-top:1.15rem; padding-top:.1rem;
+    border-top:1px solid rgba(255,255,255,.10);
 }}
-.dq-side-foot-title {{
-    font-size:1.02rem; font-weight:750; color:#FFFFFF; line-height:1.28;
-    letter-spacing:-.01em;
+.dq-side-prefs-label {{ margin-top:.85rem !important; }}
+/* st.toggle renders under the stCheckbox test id in this Streamlit line
+   (the switch is marked by role="switch" on the input, not by a test id
+   of its own), so both hooks are listed — stToggle for the day a release
+   introduces it, stCheckbox for today. */
+section[data-testid="stSidebar"] [data-testid="stToggle"] label,
+section[data-testid="stSidebar"] [data-testid="stToggle"] label p,
+section[data-testid="stSidebar"] [data-testid="stCheckbox"] label,
+section[data-testid="stSidebar"] [data-testid="stCheckbox"] label p {{
+    color:#C3D6EC !important; font-size:.81rem !important; font-weight:600 !important;
 }}
-.dq-side-foot-rule {{
-    width:46px; height:3px; border-radius:2px; background:{BRAND};
-    margin-top:.6rem;
+section[data-testid="stSidebar"] [data-testid="stToggle"],
+section[data-testid="stSidebar"] [data-testid="stCheckbox"] {{ padding:.1rem .25rem; }}
+section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {{
+    color:#8FAACB !important; font-size:.7rem !important; padding:0 .25rem;
 }}
-.dq-side-foot-note {{ font-size:.7rem; color:#8FAACB; margin-top:.55rem; line-height:1.5; }}
-.dq-side-art {{ display:block; width:100%; height:auto; margin-top:.5rem; opacity:.95; }}
-
-.dq-side-stat {{
-    display:flex; align-items:center; gap:.55rem;
-    background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.10);
-    border-radius:11px; padding:.55rem .7rem; margin-top:.5rem;
-}}
-.dq-side-stat svg {{ color:#9FC2EC; flex:none; }}
-.dq-side-stat-txt {{ font-size:.715rem; color:#C3D6EC; line-height:1.35; }}
-.dq-side-stat-txt b {{ color:#FFFFFF; font-weight:700; display:block; font-size:.755rem; }}
 
 /* ======================================================================
    3. Sticky top bar
@@ -774,11 +783,16 @@ div[data-baseweb="popover"] li[aria-selected="true"] {{ background:{BRAND_TINT} 
     background:{CANVAS}; border:1px solid {LINE};
     border-radius:12px; padding:.3rem;
 }}
+/* `flex:1 1 0` with `min-width:0` let an option shrink below its own
+   text, and the nowrap label then painted outside the grey pill
+   ("...s) (.zip)" hanging off the right edge). Sizing from the content
+   instead means the row grows to fit, and wraps onto a second line when
+   the card is too narrow, rather than overflowing. */
 [data-testid="stMain"] div[role="radiogroup"] > label {{
-    flex:1 1 0; min-width:0; justify-content:center; text-align:center;
-    padding:.45rem .8rem; border-radius:9px; margin:0 !important;
+    flex:1 1 auto; min-width:max-content; justify-content:center; text-align:center;
+    padding:.45rem .9rem; border-radius:9px; margin:0 !important;
     background:transparent; cursor:pointer; transition:all .12s ease;
-    border:1px solid transparent;
+    border:1px solid transparent; overflow:hidden;
 }}
 [data-testid="stMain"] label[data-testid="stRadioOption"] > div > div > div:not([data-testid="stMarkdownContainer"]) {{
     display:none !important;
@@ -860,12 +874,12 @@ table.oq-table {{ width:100%; border-collapse:collapse; font-size:{font_size}; }
 table.oq-table thead th {{
     background:{CANVAS}; color:{MUTED};
     font-size:.685rem; font-weight:750; letter-spacing:.07em; text-transform:uppercase;
-    text-align:left; padding:.6rem .85rem; border-bottom:1px solid {LINE};
+    text-align:left; padding:{head_pad}; border-bottom:1px solid {LINE};
     white-space:nowrap; position:sticky; top:0; z-index:1;
 }}
 table.oq-table td {{
     padding:{row_pad}; vertical-align:top; color:{INK_SOFT};
-    border-bottom:1px solid {LINE_SOFT}; line-height:1.55;
+    border-bottom:1px solid {LINE_SOFT}; line-height:{row_line};
     overflow-wrap:anywhere; word-break:break-word;
 }}
 table.oq-table tbody tr:last-child td {{ border-bottom:none; }}
@@ -887,7 +901,7 @@ table.oq-table tr.oq-pass:hover td {{ background:{OK_BG}; }}
 .oq-status {{
     display:inline-flex; align-items:center; gap:.3rem;
     font-size:.7rem; font-weight:750; letter-spacing:.01em;
-    padding:.2rem .55rem; border-radius:999px; white-space:nowrap;
+    padding:{status_pad}; border-radius:999px; white-space:nowrap;
     border:1px solid transparent;
 }}
 .oq-status::before {{
@@ -955,6 +969,10 @@ details.oq-details > summary:hover {{ background:{CANVAS}; color:{BRAND_DARK}; }
 .dq-banner b {{ font-weight:750; }}
 
 .dq-kv {{ display:flex; flex-wrap:wrap; gap:.45rem .6rem; margin:.3rem 0 .1rem 0; }}
+/* The "what will run" chips sat flush against the Run button, reading as
+   one merged block. Separate the two so the chips clearly belong to the
+   options above them and the button stands on its own. */
+.dq-kv.dq-ready {{ margin:.45rem 0 .75rem 0; gap:.5rem; }}
 .dq-kv-item {{
     font-size:.745rem; color:{INK_SOFT}; background:{CANVAS};
     border:1px solid {LINE}; border-radius:8px; padding:.25rem .55rem;
@@ -1077,21 +1095,27 @@ def render_topbar(title: str, subtitle: str = "", chips: Sequence[str] = ()) -> 
     )
 
 
-def render_sidebar(
-    nav_items: Sequence[Tuple[str, str]],
-    key: str = "dq_nav",
-    footer_title: str = "Drive Quality Forward",
-    footer_note: str = "",
-    stats: Sequence[Tuple[str, str, str]] = (),
-) -> str:
+def render_sidebar(nav_items: Sequence[Tuple[str, str]], key: str = "dq_nav") -> str:
     """The dark navigation rail. Returns the selected view's id.
 
     `nav_items` is a sequence of `(id, label)` pairs; their ORDER must
     match `_NAV_ICONS` above, which is what puts the right line icon on
     each row.
+
+    The rail carries the brandmark and the menu, and nothing else. It used
+    to end in a block of status chips, a strapline and a watermark; those
+    are gone, and `sidebar_prefs()` below now hands that space to the
+    handful of view switches worth reaching without opening Settings.
     """
     ids = [i for i, _ in nav_items]
     labels = {i: l for i, l in nav_items}
+
+    # A view that no longer exists can still be sitting in session_state —
+    # a tab left open across an update, say. Streamlit raises rather than
+    # falling back when a stored value is not among the options, so clear
+    # it here and let the radio start on the first view instead.
+    if st.session_state.get(key) not in ids:
+        st.session_state.pop(key, None)
 
     with st.sidebar:
         _md(
@@ -1114,26 +1138,24 @@ def render_sidebar(
             label_visibility="collapsed",
         )
 
-        stat_html = "".join(
-            f'<div class="dq-side-stat">{_icon(ic, 16)}'
-            f'<div class="dq-side-stat-txt"><b>{_esc(v)}</b>{_esc(l)}</div></div>'
-            for ic, v, l in stats
-        )
-        note = f'<div class="dq-side-foot-note">{_esc(footer_note)}</div>' if footer_note else ""
-        _md(
-            f"""
-            <div class="dq-side-foot">
-              {stat_html}
-              <div style="height:.85rem"></div>
-              <div class="dq-side-foot-title">{_esc(footer_title)}</div>
-              <div class="dq-side-foot-rule"></div>
-              {note}
-            </div>
-            {_artwork.sidebar_watermark()}
-            """
-        )
-
     return choice
+
+
+@contextmanager
+def sidebar_prefs(label: str = "View"):
+    """The switches that live at the foot of the navigation rail.
+
+    A context manager rather than a widget list because the widgets
+    themselves belong to app.py — this only opens the sidebar, draws the
+    divider and the group label, and lets the caller put its own
+    `st.toggle` inside.
+    """
+    with st.sidebar:
+        _md(
+            f'<div class="dq-side-prefs"></div>'
+            f'<div class="dq-navlabel dq-side-prefs-label">{_esc(label)}</div>'
+        )
+        yield
 
 
 def render_hero(

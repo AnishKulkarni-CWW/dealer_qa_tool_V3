@@ -12,14 +12,17 @@ There is **no sign-in and no history**. Every file you add lives in the
 browser session and is discarded when the tab closes; nothing is written
 to a server, and no run is ever stored.
 
-Four views live on the navigation rail:
+Three views live on the navigation rail:
 
 | View | What it is |
 | --- | --- |
-| **Home** | The welcome panel plus the whole workflow. |
-| **QA Validation** | The same workflow without the welcome panel, for when you already know the tool. |
-| **Settings** | Table density, whether the welcome panel and the progress rail are shown, a session reset, the OCR engine this install found, and the read-only QA thresholds from `modules/config.py`. |
+| **Home** | The whole workflow. |
+| **Settings** | Result table density, whether the progress rail is shown, a session reset, the OCR engine this install found, and the read-only QA thresholds from `modules/config.py`. |
 | **Help** | How to run a pass, what every check does, how Master priority resolves, and the common causes when something looks wrong. |
+
+Below the menu the rail carries one switch, **Show the welcome panel**, so
+the large panel at the top of the workspace can be folded away without
+leaving the page.
 
 Switching views never costs you an upload. Streamlit discards the state of
 any widget it did not render on the latest run, so the workflow is always
@@ -35,9 +38,9 @@ modules/theme.py     palette, navigation rail, top bar, welcome panel,
                      Streamlit widget restyle — one file, no colour or
                      radius set anywhere else
 modules/icons.py     the inline SVG line-icon set (no emoji, no CDN)
-modules/artwork.py   the welcome panel's mountains-and-car scene and the
-                     navigation rail's watermark, drawn as vector art so
-                     the app needs no image assets and no network
+modules/artwork.py   the welcome panel's mountains-and-car scene, drawn
+                     as vector art so the app needs no image assets and
+                     no network
 modules/results_ui.py  the one shared result-table renderer every QA
                      section goes through
 .streamlit/config.toml  the palette tokens Streamlit paints its OWN
@@ -149,7 +152,7 @@ modules/
   results.py                <- shared QAItem / ModuleResult (Pass/Fail/Warn) types
   theme.py                  <- the entire visual system (see "The interface" above)
   icons.py                  <- inline SVG line icons
-  artwork.py                <- the welcome panel / navigation rail vector artwork
+  artwork.py                <- the welcome panel's vector artwork
   excel_loader.py            (1) sheet selection
   dealer_select.py            (2)(3) dealer dropdown + dealer-name validation
   manual_mode.py              (4) manual text master

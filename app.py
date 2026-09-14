@@ -1994,16 +1994,6 @@ def _cached_emailer_index(pdf_bytes: bytes):
 #    hidden by CSS (ext_theme.hidden) when another view is on screen.
 # ---------------------------------------------------------------
 
-# ---- Navigation rail ------------------------------------------------
-# The OCR engine probe is cheap (an import check plus a version call) and
-# its result is worth showing up front: whether a banner's Headline /
-# Subheadline / Dealer Name can be read at all depends on it, and finding
-# that out only after a run is too late to be useful.
-try:
-    _nav_ocr_ok, _nav_ocr_engine, _nav_ocr_msg = ext_ocr.ocr_status()
-except Exception:
-    _nav_ocr_ok, _nav_ocr_engine, _nav_ocr_msg = False, "none", ""
-
 _OCR_LABELS = {
     "paddleocr": "PaddleOCR",
     "tesseract": "Tesseract",
@@ -2011,35 +2001,37 @@ _OCR_LABELS = {
     "none": "Not installed",
 }
 
+# ---- Navigation rail ------------------------------------------------
+# There is no separate "QA Validation" view. It rendered the identical
+# workflow to Home minus the welcome panel — a second door into the same
+# room — so the welcome panel is simply a switch on the rail below.
 ext_view = ext_theme.render_sidebar(
     nav_items=[
         ("home", "Home"),
-        ("qa", "QA Validation"),
         ("settings", "Settings"),
         ("help", "Help"),
     ],
     key="dq_nav",
-    footer_title="Drive Quality Forward",
-    footer_note="Nothing is uploaded anywhere — every file you add stays in this "
-                "browser session and is discarded when you close the tab.",
-    stats=[
-        ("shield", _OCR_LABELS.get(_nav_ocr_engine, _nav_ocr_engine), "Banner OCR engine"),
-        ("zap", "Session only", "No history, no sign-in"),
-    ],
 )
+
+# The one view switch worth reaching without opening Settings sits at the
+# foot of the rail. It is the SAME widget it always was — same key, same
+# session_state entry — just rendered here instead of two clicks away.
+with ext_theme.sidebar_prefs("View"):
+    # A caption rather than a `help=` tooltip: the rail is 268px wide and
+    # Streamlit hangs the tooltip's icon off the right edge of the label,
+    # where it gets clipped.
+    st.toggle(
+        "Show the welcome panel",
+        value=st.session_state.get("dq_pref_hero", True),
+        key="dq_pref_hero",
+    )
+    st.caption("Off starts the workspace at the upload cards.")
 
 # ---- Sticky product bar ---------------------------------------------
 ext_theme.render_topbar(
     title="Dealer Panel QA Tool",
     subtitle="Validate. Compare. Ensure data accuracy.",
-    chips=[
-        ext_theme.chip("BMW · MINI", "brand", "car"),
-        ext_theme.chip(
-            f"OCR: {_OCR_LABELS.get(_nav_ocr_engine, _nav_ocr_engine)}",
-            "ok" if _nav_ocr_ok else "warn",
-            "check-circle" if _nav_ocr_ok else "alert-triangle",
-        ),
-    ],
 )
 
 
@@ -2052,6 +2044,15 @@ ext_theme.render_topbar(
 if ext_view == "settings":
     ext_theme.section_title(
         "Settings", "Preferences for this browser session", "settings")
+
+    # Which OCR engine this install actually found. Probed here rather
+    # than at the top of the script because Settings is the only thing
+    # that reports it, and a page that never opens Settings has no reason
+    # to pay for the check.
+    try:
+        _nav_ocr_ok, _nav_ocr_engine, _nav_ocr_msg = ext_ocr.ocr_status()
+    except Exception:
+        _nav_ocr_ok, _nav_ocr_engine, _nav_ocr_msg = False, "none", ""
 
     _set_a, _set_b = st.columns(2, gap="large")
 
@@ -2066,11 +2067,10 @@ if ext_view == "settings":
                 horizontal=True,
                 help="Compact tightens every result row so more checks fit on screen.",
             )
-            st.toggle(
-                "Show the welcome panel on Home",
-                value=st.session_state.get("dq_pref_hero", True),
-                key="dq_pref_hero",
-            )
+            # "Show the welcome panel" is deliberately NOT here: it lives at
+            # the foot of the navigation rail, where it can be flicked
+            # without leaving the workspace. Two widgets cannot share one
+            # session_state key, so this is the single definition of it.
             st.toggle(
                 "Show the progress rail above the workflow",
                 value=st.session_state.get("dq_pref_stepper", True),
@@ -2078,7 +2078,8 @@ if ext_view == "settings":
             )
             st.caption(
                 "Both settings take effect immediately and apply to this browser "
-                "session only."
+                "session only. The welcome panel has its own switch at the foot "
+                "of the navigation rail."
             )
 
         with ext_theme.section("advanced", "Session",
@@ -2264,11 +2265,11 @@ if ext_view == "help":
 # =========================================================
 # Workflow  (always rendered; hidden by CSS on the other views)
 # =========================================================
-ext_workflow_visible = ext_view in ("home", "qa")
+ext_workflow_visible = ext_view == "home"
 
 with ext_theme.hidden(not ext_workflow_visible):
 
-    if ext_view == "home" and st.session_state.get("dq_pref_hero", True):
+    if st.session_state.get("dq_pref_hero", True):
         ext_theme.render_hero(
             title="Dealer Panel QA Tool",
             subtitle="Upload the dealer master sheet and the dealer email(s) to check, "
@@ -2282,13 +2283,6 @@ with ext_theme.hidden(not ext_workflow_visible):
             ),
             side_lines=("Better data", "Stronger dealers", "Brighter roads"),
         )
-    elif ext_view == "qa":
-        ext_theme.section_title(
-            "QA Validation",
-            "Upload, configure and run — results appear below",
-            "check-square",
-        )
-
     # The progress rail is filled in at the very bottom of this block,
     # once we know how far along the run actually is.
     ext_stepper_slot = st.container()
@@ -2472,7 +2466,8 @@ with ext_theme.hidden(not ext_workflow_visible):
             ]
             st.markdown(
                 '<div style="height:.35rem"></div>'
-                '<div class="dq-kv">' + "".join(_ready_bits) + "</div>",
+                '<div class="dq-kv dq-ready">' + "".join(_ready_bits) + "</div>"
+                '<div style="height:.55rem"></div>',
                 unsafe_allow_html=True,
             )
 
