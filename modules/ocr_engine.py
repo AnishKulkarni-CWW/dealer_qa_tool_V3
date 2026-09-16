@@ -161,6 +161,82 @@ OCR_TARGET_TEXT_HEIGHT_PX = 26.0  # aim for roughly this median word height
 OCR_MAX_UPSCALE = 3               # never scale beyond this (noise starts winning)
 
 # --------------------------------------------------------------------------
+# Low-contrast display type (see `_render_variants` / `_tesseract_word_boxes`)
+# --------------------------------------------------------------------------
+# The current BMW creative guideline sets the headline and subheadline in
+# WHITE type directly over the photograph's sky — white on a pale blue that
+# measures barely 2:1 against the glyphs. Tesseract returns literally
+# nothing for that: not a low-confidence guess, zero word boxes, so the
+# banner arrives at the clustering stage with no lines at all and every
+# banner-text check reports "no expected value".
+#
+# The fix is to give Tesseract a second rendition of the same pixels in
+# which the white type IS the ink: everything at or above this grey level
+# becomes black, everything below becomes white paper. On the measured
+# creative that recovers the complete headline and subheadline, and because
+# the rendition keeps the original dimensions, every box it returns is
+# already in original-image coordinates.
+#
+# 200 is deliberately high. Lower values (150-180) also read pure-white
+# type on black, but on a light sky they start swallowing the sky itself;
+# 200 isolates the type on both.
+WHITE_INK_THRESHOLD = 200
+
+# WHEN the white-ink rendition is used instead of the artwork as supplied.
+#
+# Measured across the ten EMAILER pages of a real sales-push bulletin, the
+# original rendition reads them at 74-96% confidence and the white-ink
+# rendition at 21-82% — on the same pages, recovering a similar number of
+# characters but fragmenting words ("LET'S" -> "ET'S", "THE" -> "TH E").
+# An earlier version of this merged both renditions' boxes and let the one
+# with more characters lead; fragmentation inflates a character count, so
+# the worse read won and three of the ten pages came back mangled.
+#
+# So: the artwork as supplied always leads, and the white-ink rendition
+# replaces it only when it is decisively better — which is exactly the
+# case it exists for, where the original recovers nothing at all. Score is
+# characters weighted by confidence, and the margin keeps a rendition that
+# is merely equal from taking over.
+MIN_OCR_CHARS_BEFORE_RETRY = 10
+RENDITION_SWITCH_MARGIN = 1.5
+
+# --------------------------------------------------------------------------
+# Banner layout (see `group_lines_into_blocks` / `detect_banner_layout`)
+# --------------------------------------------------------------------------
+# Where the headline sits on the banner is a creative-guideline decision and
+# it has now changed twice:
+#
+#   CLASSIC  the photograph fills the banner, the model badge ("THE X3") is
+#            set large over it, and the headline + subheadline sit in a band
+#            at the FOOT, next to the BMW roundel.
+#   LATEST   the headline + subheadline are set at the HEAD of the banner,
+#            above the photograph, and the roundel moves to the bottom-left.
+#
+# Font size alone cannot tell these apart, and on the classic layout the
+# model badge is physically the largest type on the artwork — so pure
+# size banding hands "X3" back as the headline and demotes the real
+# headline to subheadline. Grouping the lines into vertical BLOCKS first
+# and banding only within the block that actually carries the message
+# solves both layouts at once: a two-character badge sitting on its own
+# carries almost no text weight, so it never wins.
+#
+# A new block starts when the vertical gap to the previous line exceeds
+# this multiple of the median line height.
+BLOCK_GAP_RATIO = 1.9
+
+BANNER_LAYOUT_AUTO = "auto"        # pick the message block by text weight
+BANNER_LAYOUT_LATEST = "latest"    # force the topmost qualifying block
+BANNER_LAYOUT_CLASSIC = "classic"  # force the bottommost qualifying block
+BANNER_LAYOUT_SIZE_BANDS = "size-bands"  # the original size-only behaviour
+
+BANNER_LAYOUT_CHOICES = (
+    BANNER_LAYOUT_AUTO,
+    BANNER_LAYOUT_LATEST,
+    BANNER_LAYOUT_CLASSIC,
+    BANNER_LAYOUT_SIZE_BANDS,
+)
+
+# --------------------------------------------------------------------------
 # Robust per-line font size (see `_core_line_height`)
 # --------------------------------------------------------------------------
 # A line's font size must NOT be measured as `max(bottom) - min(top)` across
@@ -267,6 +343,18 @@ class ClusteredLines:
     # field. Never used for pass/fail on their own — surfaced as a note so
     # unexpected banner copy is visible rather than silently dropped.
     unmatched_lines: List["TextLine"] = field(default_factory=list)
+    # Which banner layout the fields were read against — "latest" (headline
+    # at the head of the banner) or "classic" (headline at the foot), or
+    # "size-bands" when the legacy size-only path was forced. Reported so a
+    # run can say which guideline it read the artwork as.
+    layout_used: str = ""
+    # Text found elsewhere on the artwork than the block carrying the
+    # message: the model badge, a number plate, a strapline in a corner.
+    # Deliberately NOT part of `other_lines`, because `other_lines` feeds
+    # the Dealer Name fallback and a two-character model badge is the last
+    # thing that should be offered up as a dealer name. Still searched by
+    # the content matcher, which looks at every line regardless of band.
+    outside_block_lines: List["TextLine"] = field(default_factory=list)
 
     @property
     def headline_text(self) -> str:
@@ -288,6 +376,12 @@ class ClusteredLines:
         otherwise whatever fell into the geometric `other_lines` band
         (font-size-only guess, kept as a fallback for when no expected
         dealer name was supplied to match against).
+
+        The fallback only ever draws on the message block's own smaller
+        type. Text from elsewhere on the artwork lives in
+        `outside_block_lines` and is never offered here: a classic-layout
+        banner whose only other text is the model badge should report no
+        dealer name at all rather than hand back "X3".
         """
         if self.dealer_line is not None:
             return self.dealer_line.text
@@ -297,7 +391,8 @@ class ClusteredLines:
     def all_text(self) -> str:
         # preserves top-to-bottom reading order across all bands
         all_lines = sorted(
-            self.headline_lines + self.subheadline_lines + self.other_lines,
+            self.headline_lines + self.subheadline_lines
+            + self.other_lines + self.outside_block_lines,
             key=lambda l: l.top,
         )
         return "\n".join(l.text for l in all_lines)
@@ -914,8 +1009,14 @@ def _tesseract_data(image: Image.Image, config: str = "") -> dict:
     )
 
 
-def _word_boxes(data: dict) -> List[dict]:
-    """Flattens Tesseract's parallel-array output into word dicts."""
+def _word_boxes(data: dict, source: str = "") -> List[dict]:
+    """Flattens Tesseract's parallel-array output into word dicts.
+
+    `source` records which rendition a box came from and namespaces the
+    line key with it. Each rendition numbers its blocks/paragraphs/lines
+    from zero, so the namespace is what keeps two renditions' lines from
+    ever being glued together by `_group_boxes_into_lines`.
+    """
     boxes: List[dict] = []
     n = len(data.get("text", []))
     confs = data.get("conf", ["-1"] * n)
@@ -935,7 +1036,7 @@ def _word_boxes(data: dict) -> List[dict]:
             "height": float(data["height"][i]),
             "left": float(data["left"][i]),
             "conf": conf,
-            "key": (data["block_num"][i], data["par_num"][i], data["line_num"][i]),
+            "key": (source, data["block_num"][i], data["par_num"][i], data["line_num"][i]),
         })
     return boxes
 
@@ -977,9 +1078,89 @@ def _upscale_factor_for(boxes: List[dict]) -> int:
     return max(2, min(OCR_MAX_UPSCALE, factor))
 
 
+def _render_variants(image: Image.Image) -> List[Tuple[str, Image.Image]]:
+    """The renditions of a banner that Tesseract is asked to read.
+
+    "original" is the artwork as supplied. "white-ink" re-renders it so
+    that near-white pixels become black ink on white paper, which is the
+    only way the current guideline's white-on-sky headline is readable at
+    all (see WHITE_INK_THRESHOLD). Both keep the original dimensions, so
+    every box either returns is already in original-image coordinates.
+    """
+    variants: List[Tuple[str, Image.Image]] = [("original", image)]
+    try:
+        grey = image.convert("L")
+        white_ink = grey.point(
+            lambda p: 0 if p >= WHITE_INK_THRESHOLD else 255
+        ).convert("RGB")
+        variants.append(("white-ink", white_ink))
+    except Exception:
+        pass
+    return variants
+
+
+def _boxes_strength(boxes: List[dict]) -> Tuple[int, float]:
+    """How much real text a rendition recovered: (alphanumeric characters,
+    mean confidence). Used only to decide which rendition leads the merge."""
+    chars = 0
+    confs: List[float] = []
+    for w in boxes:
+        text = re.sub(r"[^A-Za-z0-9]", "", w.get("text") or "")
+        if not text:
+            continue
+        chars += len(text)
+        try:
+            confs.append(float(w.get("conf")))
+        except (TypeError, ValueError):
+            confs.append(100.0)
+    return chars, (sum(confs) / len(confs) if confs else 0.0)
+
+
+def _boxes_for_renditions(image: Image.Image) -> List[dict]:
+    """Reads `image` as supplied, and falls back to the white-ink rendition
+    only when that is decisively the better read.
+
+    See MIN_OCR_CHARS_BEFORE_RETRY / RENDITION_SWITCH_MARGIN for the
+    measurements behind "decisively": the artwork as supplied is right
+    almost always, and the one case it is not — white display type over a
+    pale sky — it returns nothing at all rather than something poor.
+    """
+    variants = _render_variants(image)
+    if not variants:
+        return []
+
+    def read(label: str, img: Image.Image) -> List[dict]:
+        try:
+            return _word_boxes(_tesseract_data(img), source=label)
+        except Exception:
+            return []
+
+    label0, img0 = variants[0]
+    primary = read(label0, img0)
+    p_chars, p_conf = _boxes_strength(primary)
+    p_score = p_chars * p_conf
+
+    for label, img in variants[1:]:
+        alt = read(label, img)
+        a_chars, a_conf = _boxes_strength(alt)
+        a_score = a_chars * a_conf
+        decisive = (
+            (p_chars < MIN_OCR_CHARS_BEFORE_RETRY and a_chars > p_chars)
+            or a_score > p_score * RENDITION_SWITCH_MARGIN
+        )
+        if decisive:
+            primary, p_chars, p_conf, p_score = alt, a_chars, a_conf, a_score
+    return primary
+
+
 def _tesseract_word_boxes(image: Image.Image) -> Tuple[List[dict], int]:
     """
     OCRs `image` and returns `(word_boxes, scale_used)`.
+
+    Every pass goes through `_boxes_for_renditions`, which reads the
+    artwork as supplied and falls back to a white-ink rendition when that
+    returns nothing — without which the current guideline's white-on-sky
+    headline produces no boxes at all.
 
     When the first pass shows the type is too small to read reliably, the
     image is enlarged and OCR'd again — and every coordinate is divided
@@ -992,7 +1173,7 @@ def _tesseract_word_boxes(image: Image.Image) -> Tuple[List[dict], int]:
     same banner (the flat blob showed a word that the per-line output had
     silently dropped). One source of truth removes that whole class of bug.
     """
-    boxes = _word_boxes(_tesseract_data(image))
+    boxes = _boxes_for_renditions(image)
     factor = _upscale_factor_for(boxes)
     if factor <= 1:
         return boxes, 1
@@ -1000,7 +1181,7 @@ def _tesseract_word_boxes(image: Image.Image) -> Tuple[List[dict], int]:
     try:
         big = image.convert("RGB")
         big = big.resize((big.width * factor, big.height * factor), Image.LANCZOS)
-        big_boxes = _word_boxes(_tesseract_data(big))
+        big_boxes = _boxes_for_renditions(big)
     except Exception:
         return boxes, 1
     if not big_boxes:
@@ -1305,82 +1486,148 @@ def extract_lines(image: Image.Image, prefer: str = "paddleocr") -> LinesResult:
         return LinesResult(lines=[], engine_used="none", warning=f"OCR unavailable: {e}")
 
 
-def cluster_lines_by_size(
-    lines_result: LinesResult,
-    jitter_tolerance_ratio: float = 0.08,
-    expected_dealer_name: Union[str, Sequence[str], None] = "",
-) -> ClusteredLines:
+def group_lines_into_blocks(lines: List[TextLine]) -> List[List[TextLine]]:
+    """Splits OCR'd lines into vertically-separated blocks of copy.
+
+    A banner is not one run of text: it is a headline block, maybe a model
+    badge somewhere else, maybe a dealer line down in a corner. A new block
+    starts wherever the vertical gap to the previous line exceeds
+    `BLOCK_GAP_RATIO` times the MEDIAN line height on the banner.
+
+    The median is the right yardstick rather than either line's own height:
+    on the classic layout the model badge is five times the height of the
+    body copy, so measuring the gap against the badge's own height would
+    swallow the entire banner into a single block, and measuring against
+    the smallest line would split a two-line headline in half.
     """
-    Groups OCR'd lines into Headline (largest font band), Subheadline
-    (next distinct, smaller font band), and Dealer Name / Other (any
-    remaining, smaller bands) — purely from relative line height, no
-    dependency on absolute pixel size, so it works whether the banner was
-    cropped/scaled to any resolution.
+    usable = [l for l in lines if l.height > 0]
+    if len(usable) <= 1:
+        return [sorted(usable, key=lambda l: l.top)] if usable else []
 
-    A fixed percentage threshold for "is this a new band?" doesn't work
-    across different banners — some banners have a huge Headline vs
-    Subheadline size difference and a small Subheadline vs Dealer Name
-    difference, others are closer to uniform across all three, or even
-    collapse Headline+Subheadline into nearly the same size on a
-    different banner design. A single cutoff percentage is always wrong
-    for some real banner somewhere.
+    ordered = sorted(usable, key=lambda l: l.top)
+    threshold = max(_median([l.height for l in ordered]) * BLOCK_GAP_RATIO, 1.0)
 
-    Instead, this uses a "biggest relative gap" cut-point approach that
-    adapts to whatever size differences actually exist on THIS banner:
-      1. Merge lines whose heights are within `jitter_tolerance_ratio`
-         (default 8%) OR within `JITTER_TOLERANCE_MIN_PX` pixels of each
-         other into the same "distinct size" group first — this absorbs
-         pure OCR measurement noise between two lines that are visually
-         the same font size (e.g. a wrapped 2-line Headline), without
-         conflating genuinely different sizes. Line heights arrive here
-         from `_core_line_height()`, which measures the smallest word box
-         on the line rather than the line's overall extent — without that,
-         a single apostrophe was enough to make one visual line of a
-         headline measure 74% taller than the line above it and land in a
-         different band.
-      2. Take the resulting distinct size groups, sorted largest to
-         smallest, and compute the proportional gap between each
-         consecutive pair.
-      3. Cut at the two BIGGEST gaps (if there are 3+ distinct size
-         groups) to form up to 3 bands: Headline / Subheadline / Dealer
-         Name. If there are only 2 distinct sizes, one gap is cut,
-         forming Headline / Subheadline (Dealer Name band stays empty).
-         If there's only 1 distinct size, everything is Headline.
-      This way the split always lands on the biggest actual size jump on
-      THIS banner, rather than requiring that jump to exceed some fixed
-      percentage that may not match every banner's proportions.
+    blocks: List[List[TextLine]] = [[ordered[0]]]
+    for prev, cur in zip(ordered, ordered[1:]):
+        gap = cur.top - (prev.top + prev.height)
+        if gap > threshold:
+            blocks.append([cur])
+        else:
+            blocks[-1].append(cur)
+    return blocks
 
-    Band 1 = Headline, Band 2 = Subheadline, Band 3 (if present) =
-    Dealer Name / Other.
 
-    --------------------------------------------------------------------
-    `expected_dealer_name` — content-aware dealer-line correction
-    --------------------------------------------------------------------
-    Font-size geometry alone cannot always separate Subheadline from
-    Dealer Name: real banners commonly render both at THE SAME size
-    (e.g. "BMW FUEL ADDITIVES." directly above "Bavaria Motors" at
-    matching OCR'd heights), so height-only clustering merges them into
-    one band and no dedicated Dealer Name band ever forms.
+def _block_weight(block: List[TextLine]) -> float:
+    """How much MESSAGE a block carries: characters weighted by type size.
 
-    When `expected_dealer_name` is supplied (non-empty), this runs
-    `find_dealer_line()` across ALL OCR'd lines — regardless of which
-    band they landed in — looking for a line whose words strongly match
-    the expected name. If a confident match is found, that exact line
-    is moved out of whichever band it was sitting in (so it never also
-    pollutes Headline/Subheadline text) and recorded on
-    `clustered.dealer_line`. This is purely additive/corrective: if no
-    confident content match is found (e.g. no dealer name is actually
-    shown on this banner), the original geometric bands are returned
-    completely unchanged, so a banner without a dealer name never gets
-    a false dealer line invented for it, and existing behaviour when no
-    `expected_dealer_name` is passed at all is identical to before.
+    Deliberately not "tallest type wins". On the classic layout the model
+    badge ("X3") is the largest thing on the artwork but carries two
+    characters; the headline is smaller type but many times the text. Any
+    measure that ignores length hands the headline slot to the badge.
     """
-    clustered = ClusteredLines()
-    if not lines_result.lines:
-        return clustered
+    total = 0.0
+    for line in block:
+        chars = len(re.sub(r"[^A-Za-z0-9]", "", line.text or ""))
+        total += chars * max(line.height, 1.0)
+    return total
 
-    # Step 1: merge near-identical heights into "distinct size" groups.
-    by_height_desc = sorted(lines_result.lines, key=lambda l: l.height, reverse=True)
+
+def _block_center(block: List[TextLine]) -> float:
+    if not block:
+        return 0.0
+    return sum(l.center_y for l in block) / len(block)
+
+
+def detect_banner_layout(
+    lines: List[TextLine], image_height: Optional[float] = None
+) -> str:
+    """Which guideline this artwork follows, from where its message sits.
+
+    Returns BANNER_LAYOUT_LATEST when the message block sits in the upper
+    half of the banner (headline set at the head, the current guideline)
+    and BANNER_LAYOUT_CLASSIC when it sits in the lower half (headline in a
+    band at the foot, next to the roundel).
+
+    `image_height` is what makes the answer trustworthy, so callers that
+    have the banner should always pass it. Measuring the block's position
+    against the other TEXT on the banner instead cannot answer at all when
+    the banner carries a single block of copy — that block is then both the
+    topmost and the bottommost thing on the artwork and lands at exactly
+    the midpoint — which is the common case on the current guideline, where
+    the headline and subheadline are the only type on the banner. Without a
+    height the text-extent fallback is used and ties resolve to CLASSIC,
+    which is what the tool assumed before either guideline was named.
+    """
+    blocks = group_lines_into_blocks(lines)
+    if not blocks:
+        return BANNER_LAYOUT_CLASSIC
+    message = max(blocks, key=_block_weight)
+    center = _block_center(message)
+
+    if image_height and image_height > 0:
+        return BANNER_LAYOUT_LATEST if (center / image_height) < 0.5 else BANNER_LAYOUT_CLASSIC
+
+    tops = [l.top for l in lines if l.height > 0]
+    bottoms = [l.top + l.height for l in lines if l.height > 0]
+    if not tops:
+        return BANNER_LAYOUT_CLASSIC
+    extent_top, extent_bottom = min(tops), max(bottoms)
+    if extent_bottom - extent_top <= 0:
+        return BANNER_LAYOUT_CLASSIC
+    position = (center - extent_top) / (extent_bottom - extent_top)
+    return BANNER_LAYOUT_LATEST if position < 0.5 else BANNER_LAYOUT_CLASSIC
+
+
+def _pick_message_block(
+    blocks: List[List[TextLine]], layout: str, image_height: Optional[float] = None
+) -> Tuple[List[TextLine], str]:
+    """The block whose copy the Headline/Subheadline are read from.
+
+    `layout` AUTO picks purely on text weight, which is what identifies the
+    message on both guidelines. LATEST and CLASSIC additionally constrain
+    the choice to the upper / lower half of the banner, for when a reviewer
+    knows which guideline the artwork follows and auto-detection has picked
+    the wrong block. A forced side with no block on it falls back to the
+    weightiest block rather than returning nothing.
+    """
+    if not blocks:
+        return [], layout
+    ranked = sorted(blocks, key=_block_weight, reverse=True)
+
+    if layout in (BANNER_LAYOUT_LATEST, BANNER_LAYOUT_CLASSIC):
+        centers = [_block_center(b) for b in blocks]
+        if image_height and image_height > 0:
+            midpoint = image_height / 2.0
+        else:
+            midpoint = (min(centers) + max(centers)) / 2.0 if centers else 0.0
+        if layout == BANNER_LAYOUT_LATEST:
+            side = [b for b in ranked if _block_center(b) <= midpoint]
+        else:
+            side = [b for b in ranked if _block_center(b) >= midpoint]
+        if side:
+            return side[0], layout
+
+    best = ranked[0]
+    resolved = detect_banner_layout(
+        [l for b in blocks for l in b], image_height=image_height)
+    return best, resolved
+
+
+def _band_lines_by_size(
+    lines: List[TextLine], jitter_tolerance_ratio: float
+) -> List[List[TextLine]]:
+    """Splits lines into up to three font-size bands, largest first.
+
+    This is the original biggest-relative-gap banding, lifted out of
+    `cluster_lines_by_size` unchanged so that both the layout-aware path
+    and the legacy size-only path run the exact same algorithm. See
+    `cluster_lines_by_size`'s docstring for why the cut points are chosen
+    by the biggest gap rather than a fixed percentage.
+    """
+    if not lines:
+        return []
+
+    by_height_desc = sorted(lines, key=lambda l: l.height, reverse=True)
     size_groups: List[List[TextLine]] = []
     group_anchor_height = None
     for line in by_height_desc:
@@ -1402,26 +1649,18 @@ def cluster_lines_by_size(
                 size_groups[-1].append(line)
                 group_anchor_height = max(group_anchor_height, line.height)
 
+    if len(size_groups) == 1:
+        return [size_groups[0]]
+
     # Each size group's representative height = its tallest member (most
     # reliable single measurement, since OCR under-measures more often
     # than it over-measures on partial/descender-heavy text).
     group_heights = [max(l.height for l in g) for g in size_groups]
-
-    if len(size_groups) == 1:
-        clustered.headline_lines = sorted(size_groups[0], key=lambda l: l.top)
-        _apply_content_aware_dealer_match(clustered, lines_result.lines, expected_dealer_name)
-        return clustered
-
-    # Step 2: proportional gap between each consecutive pair of distinct
-    # size groups (gap relative to the taller of the pair).
     gaps = []
     for i in range(len(group_heights) - 1):
         taller, shorter = group_heights[i], group_heights[i + 1]
-        gap = (taller - shorter) / taller if taller > 0 else 0
-        gaps.append(gap)
+        gaps.append((taller - shorter) / taller if taller > 0 else 0)
 
-    # Step 3: cut at the biggest gap(s) — up to 2 cuts (3 bands). Cuts are
-    # chosen by gap size, largest first, then applied in position order.
     num_cuts = min(2, len(gaps))
     cut_positions = sorted(
         sorted(range(len(gaps)), key=lambda i: gaps[i], reverse=True)[:num_cuts]
@@ -1430,18 +1669,108 @@ def cluster_lines_by_size(
     bands: List[List[TextLine]] = []
     band_start = 0
     for cut_idx in cut_positions:
-        band_groups = size_groups[band_start:cut_idx + 1]
-        bands.append([l for g in band_groups for l in g])
+        bands.append([l for g in size_groups[band_start:cut_idx + 1] for l in g])
         band_start = cut_idx + 1
     bands.append([l for g in size_groups[band_start:] for l in g])
+    return bands
 
+
+def cluster_lines_by_size(
+    lines_result: LinesResult,
+    jitter_tolerance_ratio: float = 0.08,
+    expected_dealer_name: Union[str, Sequence[str], None] = "",
+    layout: str = BANNER_LAYOUT_AUTO,
+    image_height: Optional[float] = None,
+) -> ClusteredLines:
+    """
+    Reads Headline / Subheadline / Dealer Name off a banner's OCR'd lines.
+
+    TWO STAGES: WHERE, THEN HOW BIG
+    -------------------------------
+    1. `group_lines_into_blocks()` splits the lines into vertically
+       separated blocks, and the block carrying the most text weight is
+       taken as the banner's message. Everything else on the artwork — the
+       model badge, a number plate, a dealer line in a far corner — is set
+       aside into `other_lines`.
+    2. Inside that block, `_band_lines_by_size()` splits by font size:
+       largest band = Headline, next = Subheadline, anything smaller =
+       Dealer Name / Other.
+
+    WHY THE BLOCK STAGE EXISTS
+    --------------------------
+    Size alone was enough while every banner put its headline in a band at
+    the foot and the OCR pass could not read the model badge set over the
+    photograph. Both of those stopped being true: the current guideline
+    sets the headline at the HEAD of the banner, and reading white type off
+    a pale sky (see WHITE_INK_THRESHOLD) also recovers the badge. On the
+    classic layout the badge is physically the largest type on the artwork,
+    so pure size banding returns Headline "X3" and demotes the real
+    headline to Subheadline. Weighing a block by characters-times-size
+    rather than height alone puts a two-character badge where it belongs
+    however large it is set, and works unchanged on both guidelines.
+
+    `layout` is BANNER_LAYOUT_AUTO by default, which decides from the
+    artwork. BANNER_LAYOUT_LATEST / BANNER_LAYOUT_CLASSIC force the message
+    to be read from the upper / lower half for artwork that auto-detection
+    reads wrongly. BANNER_LAYOUT_SIZE_BANDS restores the original
+    size-only behaviour across every line on the banner, block stage and
+    all, for comparing against how a run behaved before this change.
+
+    Band sizing itself is unchanged: see `_band_lines_by_size()` for why
+    the cut points are chosen by the biggest relative gap on THIS banner
+    rather than a fixed percentage.
+
+    --------------------------------------------------------------------
+    `expected_dealer_name` — content-aware dealer-line correction
+    --------------------------------------------------------------------
+    Font-size geometry alone cannot always separate Subheadline from
+    Dealer Name: real banners commonly render both at THE SAME size
+    (e.g. "BMW FUEL ADDITIVES." directly above "Bavaria Motors" at
+    matching OCR'd heights), so height-only clustering merges them into
+    one band and no dedicated Dealer Name band ever forms.
+
+    When `expected_dealer_name` is supplied (non-empty), this runs
+    `find_dealer_line()` across ALL OCR'd lines — regardless of which
+    band or block they landed in — looking for a line whose words strongly
+    match the expected name. If a confident match is found, that exact line
+    is moved out of whichever band it was sitting in (so it never also
+    pollutes Headline/Subheadline text) and recorded on
+    `clustered.dealer_line`. This is purely additive/corrective: if no
+    confident content match is found (e.g. no dealer name is actually
+    shown on this banner), the bands are returned unchanged, so a banner
+    without a dealer name never gets a false dealer line invented for it.
+    """
+    clustered = ClusteredLines()
+    if not lines_result.lines:
+        clustered.layout_used = layout if layout != BANNER_LAYOUT_AUTO else ""
+        return clustered
+
+    if layout == BANNER_LAYOUT_SIZE_BANDS:
+        message_lines = list(lines_result.lines)
+        outside: List[TextLine] = []
+        resolved_layout = BANNER_LAYOUT_SIZE_BANDS
+    else:
+        blocks = group_lines_into_blocks(lines_result.lines)
+        message_lines, resolved_layout = _pick_message_block(
+            blocks, layout, image_height=image_height)
+        in_message = {id(l) for l in message_lines}
+        outside = [l for l in lines_result.lines if id(l) not in in_message]
+
+    clustered.layout_used = resolved_layout
+
+    bands = _band_lines_by_size(message_lines, jitter_tolerance_ratio)
     if len(bands) >= 1:
         clustered.headline_lines = sorted(bands[0], key=lambda l: l.top)
     if len(bands) >= 2:
         clustered.subheadline_lines = sorted(bands[1], key=lambda l: l.top)
-    if len(bands) >= 3:
-        remaining = [l for band in bands[2:] for l in band]
-        clustered.other_lines = sorted(remaining, key=lambda l: l.top)
+
+    # Anything in the message block smaller than the Subheadline band. This
+    # is the Dealer Name band, and the `dealer_text` fallback reads it.
+    clustered.other_lines = sorted(
+        [l for band in bands[2:] for l in band], key=lambda l: l.top)
+    # Everything else on the artwork, kept separately and never used as a
+    # dealer-name guess — see `outside_block_lines`.
+    clustered.outside_block_lines = sorted(outside, key=lambda l: l.top)
 
     _apply_content_aware_dealer_match(clustered, lines_result.lines, expected_dealer_name)
     return clustered
@@ -1472,6 +1801,8 @@ def _apply_content_aware_dealer_match(
     clustered.headline_lines = [l for l in clustered.headline_lines if l is not match]
     clustered.subheadline_lines = [l for l in clustered.subheadline_lines if l is not match]
     clustered.other_lines = [l for l in clustered.other_lines if l is not match]
+    clustered.outside_block_lines = [
+        l for l in clustered.outside_block_lines if l is not match]
 
 
 def extract_clustered_text(
@@ -1479,11 +1810,15 @@ def extract_clustered_text(
     prefer: str = "paddleocr",
     jitter_tolerance_ratio: float = 0.08,
     expected_dealer_name: Union[str, Sequence[str], None] = "",
+    layout: str = BANNER_LAYOUT_AUTO,
 ) -> Tuple[ClusteredLines, LinesResult]:
     """
     Convenience wrapper: OCRs the banner and returns both the size-based
     line clusters and the raw LinesResult (for the flat "found" text /
     warnings callers may still want to display).
+
+    `layout` selects how Headline/Subheadline are located on the artwork —
+    auto-detected by default; see `cluster_lines_by_size()`.
 
     `expected_dealer_name` is optional and passed straight through to
     `cluster_lines_by_size()` for content-aware dealer-line correction
@@ -1498,5 +1833,7 @@ def extract_clustered_text(
         lines_result,
         jitter_tolerance_ratio=jitter_tolerance_ratio,
         expected_dealer_name=expected_dealer_name,
+        layout=layout,
+        image_height=float(getattr(image, "height", 0) or 0),
     )
     return clustered, lines_result

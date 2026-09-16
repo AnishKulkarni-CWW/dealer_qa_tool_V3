@@ -18,7 +18,7 @@ Three views live on the navigation rail:
 | --- | --- |
 | **Home** | The whole workflow. |
 | **Settings** | Result table density, whether the progress rail is shown, a session reset, the OCR engine this install found, and the read-only QA thresholds from `modules/config.py`. |
-| **Help** | How to run a pass, what every check does, how Master priority resolves, and the common causes when something looks wrong. |
+| **Help** | **What gets QA'd** — every check the tool runs and what makes each one pass or fail — then how to run a pass, how Master priority resolves, and the common causes when something looks wrong. |
 
 Below the menu the rail carries one switch, **Show the welcome panel**, so
 the large panel at the top of the workspace can be folded away without
@@ -29,6 +29,14 @@ any widget it did not render on the latest run, so the workflow is always
 rendered and simply hidden by CSS while another view is on screen — your
 files, typed master text and last run's results are all still there when
 you come back.
+
+### The consolidated Excel report
+
+One workbook per run: an **Overview** sheet with a row per email, then
+**one sheet per email** carrying that email's whole report stacked top to
+bottom — summary, Content QA, Styling QA, Advanced QA, each under its own
+heading band. It used to be three sheets per email, which turned a
+nine-model run into twenty-eight tabs.
 
 ### Where the look lives
 
@@ -117,6 +125,22 @@ streamlit run app.py
 14. **Priority engine** — Manual Text > Master JPG > Master PDF > Master
     HTML ZIP > Dealer Dropdown > Excel. Only the single highest-priority
     active source is ever used; sources are never combined.
+14b. **Banner layouts, both guidelines** — where the Headline and
+    Subheadline sit on a banner is a creative-guideline decision and it has
+    changed: the current guideline sets them at the HEAD of the banner, the
+    previous one in a band at the FOOT next to the roundel. Both are read,
+    auto-detected per image, so a Master on one guideline and an adapt on
+    the other are read correctly in the same run. **Banner layout** in
+    Validation Options forces one for artwork that auto-detection reads
+    wrongly. Two things make this work: the banner's lines are grouped into
+    vertical blocks and the fields are read from the block carrying the
+    message (so a large model badge can never be returned as the headline),
+    and a banner whose white display type sits over a pale sky — which
+    Tesseract returns *nothing* at all for — is re-read as a white-ink
+    rendition. The artwork as supplied always leads; the rendition is only
+    used when it is decisively the better read, so every page of a real
+    bulletin deck still reads exactly as it did.
+
 15. **Tabbed results** — every QA section renders as KPI tiles (total /
     passed / failed / warnings) above a tabbed record table: Issues /
     Warnings / Passed / All records, plus an Expand button that opens the
@@ -166,6 +190,8 @@ modules/
   body_qa.py                         (12)(13) body dealer check + As-Is/To-Be diff
   priority.py                         (14) master-source priority resolver
   results_ui.py                        (15) the one shared result-table renderer
+  excel_report.py                       (17) the consolidated workbook —
+                                             Overview plus ONE sheet per model
   website_link_qa.py                    (16) CTA + dealer panel website domain QA
 ```
 

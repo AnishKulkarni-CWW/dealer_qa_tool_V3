@@ -2139,6 +2139,158 @@ if ext_view == "settings":
 if ext_view == "help":
     ext_theme.section_title("Help", "How the tool works, end to end", "help")
 
+    # ---- What the tool actually checks ------------------------------
+    # First thing on the page on purpose: the question people ask before
+    # they upload anything is "what will this catch?", and until now the
+    # only answer was to run it and read the output.
+    ext_theme.section_title(
+        "What gets QA'd",
+        "Every check the tool runs, and what makes each one pass or fail",
+        "check-square",
+    )
+
+    _qa_always, _qa_advanced = st.columns(2, gap="large")
+
+    with _qa_always:
+        with ext_theme.section(
+            "content", "Always runs",
+            "These four run on every email, with no setup beyond the two uploads",
+        ):
+            st.markdown(
+                """
+                <div class="dq-help-h">1 · Content QA — is the dealer panel there?</div>
+                <p class="dq-help-p">Each line of the dealer's panel text from the
+                Excel sheet is looked for in the email. Matching is fuzzy, so
+                harmless rendering differences don't fail a correct email. Checked
+                line by line:</p>
+                <ul class="dq-help-ul">
+                  <li><b>Dealer name</b> — the "BMW &lt;Dealer&gt;" heading.</li>
+                  <li><b>Every branch/city name</b> and its address block, including
+                      the extra branch columns to the right of "Dealer Panels".</li>
+                  <li><b>Telephone line</b> and <b>Website line</b>.</li>
+                </ul>
+                <p class="dq-help-p"><b>Pass</b> = the line was found ·
+                <b>Missing</b> = it is not in the email.</p>
+
+                <div class="dq-help-h">2 · Dealer Panel Exact Match QA — is it there
+                <i>exactly</i>?</div>
+                <p class="dq-help-p">The same lines again, this time character for
+                character. Catches what fuzzy matching deliberately forgives:</p>
+                <ul class="dq-help-ul">
+                  <li><b>Capitalisation and spacing</b>, down to a single extra space.</li>
+                  <li><b>Phone and landline format</b> — country code, grouping and
+                      separators against the expected pattern for that number.</li>
+                  <li><b>The <code>tel:</code> link target</b> matching the number
+                      printed beside it, so tapping it dials what it says.</li>
+                </ul>
+
+                <div class="dq-help-h">3 · Styling QA — does it look right?</div>
+                <ul class="dq-help-ul">
+                  <li><b>Font family, size, colour and line height</b> on the dealer
+                      panel and the module directly above it.</li>
+                  <li><b>Bold rules</b> — the dealer name and every branch/city name
+                      must render bold; body lines must not.</li>
+                  <li><b>Double spaces</b> anywhere in the copy.</li>
+                  <li><b>Punctuation spacing</b> — a space before a comma or full
+                      stop, a missing space after one.</li>
+                  <li><b>Image weight</b> — any image over 300&nbsp;KB, when the
+                      images are supplied (model .zip, or an images .zip).</li>
+                </ul>
+
+                <div class="dq-help-h">4 · Website &amp; CTA link QA</div>
+                <ul class="dq-help-ul">
+                  <li>The panel's own <b>"Website:" line</b> belongs to this dealer's
+                      domain.</li>
+                  <li>The <b>CTA button's <code>href</code></b> belongs to the same
+                      dealer's domain.</li>
+                  <li>The two <b>agree with each other</b>.</li>
+                </ul>
+                <p class="dq-help-p">Matched by domain, not by exact URL — a deep
+                link to a model page still passes.</p>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with _qa_advanced:
+        with ext_theme.section(
+            "advanced", "Advanced QA — opt in",
+            "Switch on 'Enable Advanced QA' and supply a Master reference",
+        ):
+            st.markdown(
+                """
+                <p class="dq-help-p">These compare the email against an approved
+                <b>Master</b> — a Master JPG, a Master PDF bulletin, a Master HTML
+                zip, or text you type in. Without a Master there is nothing to
+                compare against and each check reports that rather than guessing.</p>
+
+                <div class="dq-help-h">5 · Banner Text QA</div>
+                <p class="dq-help-p">The banner is pixels, so its words are read by
+                OCR and compared with the Master's, word by word:</p>
+                <ul class="dq-help-ul">
+                  <li><b>Headline</b> — every word present, in order, spelled and
+                      spaced the same. Missing and extra words are both named.</li>
+                  <li><b>Subheadline</b> — the same treatment.</li>
+                  <li><b>Dealer name on the banner</b>, when "Dealer exists in
+                      Banner" is ticked.</li>
+                </ul>
+                <p class="dq-help-p">Where the headline sits on the banner differs
+                between creative guidelines — at the head on the current one, in a
+                band at the foot on the previous one. Both are read automatically;
+                <b>Banner layout</b> in Validation Options forces one if a banner is
+                read wrongly.</p>
+
+                <div class="dq-help-h">6 · Body QA</div>
+                <ul class="dq-help-ul">
+                  <li><b>Dealer name in the body copy</b>, when "Dealer exists in
+                      Body" is ticked. Only the greeting and body copy are searched,
+                      never the dealer panel — that is already checked above.</li>
+                  <li><b>As Is / To Be comparison</b> — type both and the live body
+                      is diffed against them, with added, removed and changed
+                      wording called out.</li>
+                </ul>
+
+                <div class="dq-help-h">7 · Summary</div>
+                <p class="dq-help-p">One row per Advanced QA module with its verdict
+                and counts, so a run can be read at module level first.</p>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with ext_theme.section(
+        "report", "What you get out",
+        "On screen and in the workbook",
+    ):
+        _out_a, _out_b = st.columns(2, gap="large")
+        with _out_a:
+            st.markdown(
+                """
+                <p class="dq-help-p"><b>On screen</b>, per email: a KPI row (total,
+                passed, failed, warnings with percentages) above each section, and a
+                tabbed table — <b>Issues</b>, <b>Warnings</b>, <b>Passed</b>,
+                <b>All records</b>. The failure and warning counts sit above the
+                tabs and stay visible whichever tab is open, so nothing that needs
+                attention can hide behind a tab you have not clicked.</p>
+                """,
+                unsafe_allow_html=True,
+            )
+        with _out_b:
+            st.markdown(
+                """
+                <p class="dq-help-p"><b>In the Excel report</b>: an
+                <b>Overview</b> sheet with one row per email, then <b>one sheet per
+                email</b> carrying its whole report top to bottom — summary, Content
+                QA, Styling QA, Advanced QA. One tab per model, however many models
+                you upload.</p>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    ext_theme.section_title(
+        "Using the tool",
+        "Running a pass, master priority, and what to do when something looks wrong",
+        "help",
+    )
+
     _help_a, _help_b = st.columns([1.25, 1], gap="large")
 
     with _help_a:
@@ -2444,6 +2596,35 @@ with ext_theme.hidden(not ext_workflow_visible):
                 help="Turn on to compute Banner / Body / OCR QA tabs below the existing report. Existing QA always runs regardless of this toggle.",
             )
 
+            # Where the Headline and Subheadline sit on the banner is a
+            # creative-guideline decision that has changed: the current
+            # guideline sets them at the HEAD of the banner, the previous
+            # one in a band at the FOOT next to the roundel. Auto-detect
+            # reads either, per image — so a Master on one guideline and an
+            # adapt on the other are both read correctly in the same run —
+            # and the explicit choices are there for artwork it reads
+            # wrongly. Only Banner QA uses this.
+            _ext_layout_labels = {
+                ext_ocr.BANNER_LAYOUT_AUTO: "Auto-detect (recommended)",
+                ext_ocr.BANNER_LAYOUT_LATEST: "Latest guideline — headline at the top",
+                ext_ocr.BANNER_LAYOUT_CLASSIC: "Classic guideline — headline at the foot",
+                ext_ocr.BANNER_LAYOUT_SIZE_BANDS: "Font size only (pre-guideline behaviour)",
+            }
+            if ext_run_advanced_qa:
+                ext_banner_layout = st.selectbox(
+                    "Banner layout",
+                    options=list(_ext_layout_labels.keys()),
+                    format_func=lambda k: _ext_layout_labels[k],
+                    index=0,
+                    key="ext_banner_layout",
+                    help="How the banner's Headline and Subheadline are located. "
+                         "Auto-detect works out which guideline each banner follows "
+                         "from where its copy sits.",
+                )
+            else:
+                ext_banner_layout = st.session_state.get(
+                    "ext_banner_layout", ext_ocr.BANNER_LAYOUT_AUTO)
+
             # A plain statement of what this run will actually cover, so the
             # Run button is never pressed on a half-filled form and then
             # answered with a red error further down the page.
@@ -2737,8 +2918,8 @@ with ext_theme.hidden(not ext_workflow_visible):
                     f'color:{ext_theme.BRAND}">{ext_theme.icon_html("file", 19)}</div>'
                     f'<div class="dq-head-txt"><div class="dq-head-title">'
                     f'{html_escape_module.escape(job["name"])}</div>'
-                    f'<div class="dq-topbar-chips" style="justify-content:flex-start;'
-                    f'margin-top:.35rem">{"".join(_job_chips)}</div></div></div>',
+                    f'<div class="dq-topbar-chips" style="justify-content:center;'
+                    f'margin-top:.45rem">{"".join(_job_chips)}</div></div></div>',
                     unsafe_allow_html=True,
                 )
 
@@ -3188,6 +3369,7 @@ with ext_theme.hidden(not ext_workflow_visible):
                                 ext_master_banner_clustered_lines, _master_lines_res = ext_ocr.extract_clustered_text(
                                     ext_master_banner_img, prefer=EXT_OCR_PREFER_KEY,
                                     expected_dealer_name=_master_dealer_name_candidates,
+                                    layout=ext_banner_layout,
                                 )
                                 master_derived_headline = ext_master_banner_clustered_lines.headline_text
                                 master_derived_subheadline = ext_master_banner_clustered_lines.subheadline_text
@@ -3246,6 +3428,24 @@ with ext_theme.hidden(not ext_workflow_visible):
 
                         if ext_master_banner_note:
                             st.caption(ext_master_banner_note)
+
+                        # Which guideline each banner was read as. Worth
+                        # saying out loud: if a Headline comes back looking
+                        # like a model badge, this is the line that explains
+                        # why, and the Banner layout control is the fix.
+                        _ext_layout_names = {
+                            ext_ocr.BANNER_LAYOUT_LATEST: "latest guideline (headline at the top)",
+                            ext_ocr.BANNER_LAYOUT_CLASSIC: "classic guideline (headline at the foot)",
+                            ext_ocr.BANNER_LAYOUT_SIZE_BANDS: "font size only",
+                        }
+                        _ext_layout_bits = []
+                        if ext_master_banner_clustered_lines is not None:
+                            _ext_layout_bits.append(
+                                "Master banner read as "
+                                + _ext_layout_names.get(
+                                    ext_master_banner_clustered_lines.layout_used,
+                                    ext_master_banner_clustered_lines.layout_used or "unknown")
+                            )
 
                         # Input banner pixels. A model-folder .zip already contains
                         # everything needed (index.html + images/), so it is used
@@ -3307,9 +3507,24 @@ with ext_theme.hidden(not ext_workflow_visible):
                                 ext_input_banner_clustered_lines, _lines_res = ext_ocr.extract_clustered_text(
                                     ext_input_banner_img, prefer=EXT_OCR_PREFER_KEY,
                                     expected_dealer_name=effective_dealer_name,
+                                    layout=ext_banner_layout,
                                 )
                             except Exception:
                                 ext_input_banner_clustered_lines = None
+
+                        if ext_input_banner_clustered_lines is not None:
+                            _ext_layout_bits.append(
+                                "this email's banner read as "
+                                + _ext_layout_names.get(
+                                    ext_input_banner_clustered_lines.layout_used,
+                                    ext_input_banner_clustered_lines.layout_used or "unknown")
+                            )
+                        if _ext_layout_bits:
+                            st.caption(
+                                "Banner layout: " + "; ".join(_ext_layout_bits)
+                                + ("." if ext_banner_layout == ext_ocr.BANNER_LAYOUT_AUTO
+                                   else " (chosen by hand in Validation Options).")
+                            )
 
                         ext_html_body_text = html_to_visible_text(BeautifulSoup(job["html"], "html.parser"))
                         # Dealer-in-Body must only look at the greeting/body-copy
@@ -3390,8 +3605,8 @@ with ext_theme.hidden(not ext_workflow_visible):
     if run and "ext_report_jobs" in dir() and ext_report_jobs:
         with ext_theme.section(
             "report", "Consolidated Excel QA Report",
-            "One workbook covering every email in this run — Overview plus per-email "
-            "Content, Style and (when enabled) Advanced QA sheets.",
+            "One workbook, one sheet per email — summary, Content QA, Styling QA and "
+            "Advanced QA stacked down the sheet, behind a run Overview.",
             right_html=ext_theme.chip(f"{len(ext_report_jobs)} email(s)", "brand", "file"),
         ):
             ext_workbook_bytes = ext_excel_report.build_qa_workbook(ext_report_jobs)
