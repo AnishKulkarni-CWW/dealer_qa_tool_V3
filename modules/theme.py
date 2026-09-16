@@ -220,6 +220,12 @@ def _css(density: str = "comfortable") -> str:
     --dq-radius:{RADIUS};
     --dq-radius-sm:{RADIUS_SM};
     --dq-shadow:{SHADOW};
+    /* The heading scale. The welcome panel's title and the band that opens
+       each section of the workspace are deliberately the SAME size, so a
+       section break reads as a page break; a card title sits one clear
+       step below it. Declared once here so the three can never drift. */
+    --dq-title-xl:2.1rem;
+    --dq-title-lg:1.45rem;
 }}
 
 /* ======================================================================
@@ -441,7 +447,7 @@ section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {{
     color:{BRAND}; margin-bottom:.45rem;
 }}
 .dq-hero-title {{
-    font-size:2.1rem; font-weight:800; color:{INK}; line-height:1.08;
+    font-size:var(--dq-title-xl); font-weight:800; color:{INK}; line-height:1.08;
     letter-spacing:-.03em;
 }}
 .dq-hero-sub {{
@@ -513,30 +519,51 @@ section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {{
     box-shadow:none !important; padding:0 !important;
 }}
 
-.dq-head {{ display:flex; align-items:flex-start; gap:.7rem; margin:0 0 .25rem 0; }}
+/* Card headings are centred too, one clear step below a section band, so
+   every card announces itself at a glance instead of having to be read. */
+.dq-head {{
+    display:flex; align-items:center; justify-content:center;
+    text-align:center; gap:.7rem; margin:0 0 .45rem 0; flex-wrap:wrap;
+}}
 .dq-card-mark {{ display:none; }}
 .dq-head-ico {{
-    flex:none; width:36px; height:36px; border-radius:11px;
+    flex:none; width:42px; height:42px; border-radius:12px;
     display:flex; align-items:center; justify-content:center;
 }}
 .dq-head-step {{
-    flex:none; width:30px; height:30px; border-radius:50%;
-    background:{BRAND}; color:#fff; font-size:.8rem; font-weight:750;
+    flex:none; width:36px; height:36px; border-radius:50%;
+    background:{BRAND}; color:#fff; font-size:.92rem; font-weight:750;
     display:flex; align-items:center; justify-content:center;
     box-shadow:0 0 0 4px {BRAND_TINT};
 }}
-.dq-head-txt {{ min-width:0; flex:1 1 auto; }}
-.dq-head-title {{ font-size:.985rem; font-weight:750; color:{INK}; line-height:1.25; }}
-.dq-head-sub {{ font-size:.755rem; color:{MUTED}; margin-top:.16rem; line-height:1.5; }}
+.dq-head-txt {{ min-width:0; flex:0 1 auto; }}
+.dq-head-title {{
+    font-size:var(--dq-title-lg); font-weight:780; color:{INK};
+    line-height:1.2; letter-spacing:-.02em;
+}}
+.dq-head-sub {{
+    font-size:.8rem; color:{MUTED}; margin-top:.25rem; line-height:1.5;
+    max-width:62ch; margin-left:auto; margin-right:auto;
+}}
 .dq-head-right {{ flex:none; display:flex; align-items:center; gap:.4rem; }}
 
+/* The band that opens a section of the workspace. Centred and set at the
+   welcome panel's own title size so that scrolling past one is
+   unmistakably "a new part of the page starts here". */
 .dq-sectitle {{
-    display:flex; align-items:center; gap:.6rem;
-    margin:1.4rem 0 .85rem 0;
+    display:flex; flex-direction:column; align-items:center; text-align:center;
+    gap:.25rem; margin:2.1rem 0 1.05rem 0;
 }}
-.dq-sectitle-t {{ font-size:1.05rem; font-weight:750; color:{INK}; letter-spacing:-.015em; }}
-.dq-sectitle-s {{ font-size:.775rem; color:{MUTED}; }}
-.dq-sectitle-rule {{ flex:1 1 auto; height:1px; background:{LINE}; }}
+.dq-sectitle-t {{
+    font-size:var(--dq-title-xl); font-weight:800; color:{INK};
+    letter-spacing:-.03em; line-height:1.12;
+}}
+.dq-sectitle-s {{ font-size:.85rem; color:{MUTED}; max-width:70ch; }}
+.dq-sectitle-rule {{
+    width:84px; height:3px; border-radius:2px; background:{BRAND};
+    margin-top:.5rem; flex:none;
+}}
+.dq-sectitle svg {{ display:none; }}   /* the rule carries the accent now */
 
 /* ======================================================================
    7. Stat tiles
@@ -981,9 +1008,25 @@ details.oq-details > summary:hover {{ background:{CANVAS}; color:{BRAND_DARK}; }
 
 .dq-help-h {{ font-size:.95rem; font-weight:750; color:{INK}; margin:.2rem 0 .35rem 0; }}
 .dq-help-p {{ font-size:.845rem; color:{INK_SOFT}; line-height:1.7; margin:0 0 .55rem 0; }}
-.dq-help-ol {{ margin:.1rem 0 .6rem 1.1rem; padding:0; }}
-.dq-help-ol li {{ font-size:.845rem; color:{INK_SOFT}; line-height:1.75; margin-bottom:.2rem; }}
-.dq-help-ol li b {{ color:{INK}; }}
+.dq-help-ol, .dq-help-ul {{ margin:.1rem 0 .6rem 1.1rem; padding:0; }}
+.dq-help-ol li, .dq-help-ul li {{
+    font-size:.845rem; color:{INK_SOFT}; line-height:1.7; margin-bottom:.25rem;
+}}
+.dq-help-ol li b, .dq-help-ul li b {{ color:{INK}; }}
+.dq-help-ul {{ list-style:none; margin-left:0; }}
+.dq-help-ul li {{ position:relative; padding-left:1.15rem; }}
+.dq-help-ul li::before {{
+    content:""; position:absolute; left:.15rem; top:.62em;
+    width:5px; height:5px; border-radius:50%; background:{BRAND};
+}}
+/* The help pages are read, not scanned — a heading inside a card needs a
+   little air above it so its own paragraphs stay attached to it. */
+.dq-help-h {{ margin-top:1.15rem; }}
+.dq-help-h:first-child {{ margin-top:.2rem; }}
+.dq-help-p code, .dq-help-ul code {{
+    background:{CANVAS}; border:1px solid {LINE}; border-radius:5px;
+    padding:.05rem .3rem; font-size:.8em;
+}}
 
 /* hidden view holder — keeps every widget mounted (and therefore keeps
    uploaded files and typed text alive) while another nav view is on
@@ -1026,6 +1069,9 @@ details.oq-details > summary:hover {{ background:{CANVAS}; color:{BRAND_DARK}; }
     .dq-hero-art {{ width:74%; opacity:.38; }}
     .dq-hero-title {{ font-size:1.7rem; }}
     .dq-hero-sub {{ max-width:46ch; }}
+}}
+@media (max-width:1280px) {{
+    :root {{ --dq-title-xl:1.7rem; --dq-title-lg:1.22rem; }}
 }}
 @media (max-width:820px) {{
     .block-container {{ padding-left:.9rem; padding-right:.9rem; }}

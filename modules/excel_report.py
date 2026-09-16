@@ -10,11 +10,11 @@ not one file per job.
 Design:
   - One "Overview" sheet: one row per job with headline Pass/Fail/Warn
     counts across Content + Style + every Advanced QA module that ran.
-  - One "<JobName> - Content" sheet per job: the content QA table.
-  - One "<JobName> - Style" sheet per job: the styling QA table.
-  - One "<JobName> - Advanced QA" sheet per job (only if advanced QA ran):
-    every ModuleResult's items, stacked with a "Module" column, plus a
-    small module-level summary block at the top.
+  - One "<JobName>" sheet per job carrying that model's WHOLE report,
+    stacked top to bottom: a summary block, then Content QA, Styling QA
+    and Advanced QA, each under its own heading band. It used to be three
+    sheets per job, which turned a nine-model run into twenty-eight tabs
+    and made "how did the X3 do?" a hunt across three of them.
   - Sheet names are sanitized/truncated/de-duplicated to respect Excel's
     31-character, no-special-character sheet name limits.
 
@@ -73,6 +73,15 @@ THIN_BORDER = Border(
     top=Side(style="thin", color="D9D9D9"),
     bottom=Side(style="thin", color="D9D9D9"),
 )
+
+SECTION_HEADER_FILL = PatternFill("solid", fgColor="1C2B4A")
+SECTION_HEADER_FONT = Font(name=FONT_NAME, size=11, bold=True, color="FFFFFF")
+
+# Every table on a model's sheet shares one set of column widths, so the
+# sheet reads as one document rather than three tables fighting over the
+# same columns. A = what was checked, B = its status, C = why.
+SHEET_COL_WIDTHS = [62, 14, 90]
+SECTION_BAND_WIDTH = len(SHEET_COL_WIDTHS)
 
 BODY_FONT = Font(name=FONT_NAME, size=10)
 WRAP_ALIGN = Alignment(vertical="top", wrap_text=True)
@@ -135,6 +144,7 @@ def _write_table(
     rows: List[List],
     status_col_indexes: Optional[List[int]] = None,
     col_widths: Optional[List[int]] = None,
+    freeze: bool = True,
 ) -> int:
     """
     Writes a header row + data rows starting at `start_row`, applying
@@ -170,7 +180,10 @@ def _write_table(
         for c_idx, width in enumerate(col_widths, start=1):
             ws.column_dimensions[get_column_letter(c_idx)].width = width
 
-    ws.freeze_panes = ws.cell(row=start_row + 1, column=1).coordinate
+    # A model sheet stacks several tables, so freezing on any one of them
+    # would pin the wrong rows; only single-table sheets freeze.
+    if freeze:
+        ws.freeze_panes = ws.cell(row=start_row + 1, column=1).coordinate
     return r + 1
 
 
@@ -250,73 +263,182 @@ def _build_overview_sheet(wb: Workbook, jobs: List[JobReportData]) -> None:
     )
 
 
-def _build_content_sheet(wb: Workbook, job: JobReportData, sheet_name: str) -> None:
+def _write_section_heading(ws: Worksheet, row: int, text: str, note: str = "") -> int:
+    """A band across the sheet that opens one section of a model's report."""
+    cell = ws.cell(row=row, column=1, value=text)
+    cell.font = SECTION_HEADER_FONT
+    cell.fill = SECTION_HEADER_FILL
+    cell.alignment = Alignment(vertical="center", horizontal="left")
+    for c in range(2, SECTION_BAND_WIDTH + 1):
+        band = ws.cell(row=row, column=c)
+        band.fill = SECTION_HEADER_FILL
+    ws.row_dimensions[row].height = 20
+    row += 1
+    if note:
+        ws.cell(row=row, column=1, value=note).font = SUBTITLE_FONT
+        row += 1
+    return row
+
+
+def _write_counts_line(ws: Worksheet, row: int, label: str, counts: Dict[str, int]) -> int:
+    """`Passed 14   Warnings 0   Failed 0` under a section heading."""
+    ws.cell(row=row, column=1, value=label).font = Font(
+        name=FONT_NAME, size=10, bold=True, color="404040")
+    pairs = [("Passed", counts.get("Pass", 0)), ("Warnings", counts.get("Warn", 0)),
+             ("Failed", counts.get("Fail", 0))]
+    col = 2
+    for name, value in pairs:
+        c = ws.cell(row=row, column=col, value=f"{name}: {value}")
+        c.font = Font(name=FONT_NAME, size=10,
+                      color={"Passed": "006100", "Warnings": "9C6500", "Failed": "9C0006"}[name],
+                      bold=value > 0)
+        col += 1
+    return row + 1
+
+
+def _build_model_sheet(wb: Workbook, job: JobReportData, sheet_name: str) -> None:
+    """EVERY section of one model's QA on ONE sheet, stacked top to bottom.
+
+    This used to be three sheets per model — Content, Style and Advanced QA
+    — which is fine for a single email and unusable for a real run: nine
+    uploaded model zips produced twenty-eight tabs, and answering "how did
+    the X3 do?" meant hunting through three of them. One sheet per model
+    means one tab per model, read straight down: summary, then Content QA,
+    then Styling QA, then Advanced QA.
+
+    Column widths are shared by every table on the sheet, so the tables
+    have to agree on what each column is for. They do: column A is always
+    the thing being checked, column B always its status, column C always
+    the explanation.
+    """
     ws = wb.create_sheet(sheet_name)
-    row = _write_title_block(ws, f"{job.job_name} — Content QA", "Dealer panel lines present in HTML.")
 
-    df = job.content_df if job.content_df is not None else pd.DataFrame(columns=["item", "status"])
-    headers = ["Item", "Status"]
-    rows = [[r["item"], r["status"]] for _, r in df.iterrows()]
-    _write_table(ws, row, headers, rows, status_col_indexes=[2], col_widths=[80, 14])
+    row = _write_title_block(
+        ws,
+        f"{job.job_name} — QA Report",
+        " · ".join([b for b in (job.dealer, job.region) if b]) or "Dealer not identified",
+    )
 
-
-def _build_style_sheet(wb: Workbook, job: JobReportData, sheet_name: str) -> None:
-    ws = wb.create_sheet(sheet_name)
-    row = _write_title_block(ws, f"{job.job_name} — Styling QA", "Dealer panel + module directly above it, plus image sizes.")
-
-    df = job.style_df if job.style_df is not None else pd.DataFrame(columns=["rule", "severity", "detail"])
-    headers = ["Rule", "Severity", "Detail"]
-    rows = [[r["rule"], r["severity"], r["detail"]] for _, r in df.iterrows()]
-    _write_table(ws, row, headers, rows, status_col_indexes=[2], col_widths=[40, 12, 80])
-
-
-def _build_advanced_sheet(wb: Workbook, job: JobReportData, sheet_name: str) -> None:
-    ws = wb.create_sheet(sheet_name)
-    row = _write_title_block(ws, f"{job.job_name} — Advanced QA", "Banner / Body / Dealer Name / Visual / OCR checks.")
-
+    content_df = job.content_df if job.content_df is not None else pd.DataFrame(columns=["item", "status"])
+    style_df = job.style_df if job.style_df is not None else pd.DataFrame(columns=["rule", "severity", "detail"])
     module_results = job.advanced_module_results or []
 
-    if not module_results:
-        ws.cell(
-            row=row, column=1,
-            value=(
-                "Advanced QA did not run for this email — tick 'Enable Advanced QA tabs for "
-                "this run' in the sidebar before clicking Run QA to populate this sheet."
-            ),
-        ).font = BODY_FONT
-        return
-
-    # Module-level summary block first.
-    summary_headers = ["Module", "Pass", "Warn", "Fail", "Overall"]
-    summary_rows = []
+    content_counts = _counts_from_status_series(
+        [str(v) for v in content_df["status"]] if len(content_df) else [])
+    style_counts = _counts_from_status_series(
+        [str(v) for v in style_df["severity"]] if len(style_df) else [])
+    adv_counts = {"Pass": 0, "Warn": 0, "Fail": 0}
     for mr in module_results:
         p, f, w = mr.counts()
-        summary_rows.append([mr.module_name, p, w, f, mr.overall_status()])
-    row = _write_table(
-        ws, row, summary_headers, summary_rows,
-        status_col_indexes=[5], col_widths=[30, 10, 10, 10, 12],
-    )
-    row += 1  # extra gap before the detail table
+        adv_counts["Pass"] += p
+        adv_counts["Warn"] += w
+        adv_counts["Fail"] += f
 
-    ws.cell(row=row, column=1, value="Detailed Checks").font = SECTION_FONT
+    # ---- summary of this model -----------------------------------------
+    row = _write_section_heading(ws, row, "SUMMARY")
+    total_fail = content_counts["Fail"] + style_counts["Fail"] + adv_counts["Fail"]
+    total_warn = content_counts["Warn"] + style_counts["Warn"] + adv_counts["Warn"]
+    overall = "Fail" if total_fail else ("Warn" if total_warn else "Pass")
+    summary_rows = [
+        ["Content QA", content_counts["Pass"], content_counts["Warn"], content_counts["Fail"]],
+        ["Styling QA", style_counts["Pass"], style_counts["Warn"], style_counts["Fail"]],
+        ["Advanced QA", adv_counts["Pass"], adv_counts["Warn"], adv_counts["Fail"]],
+    ]
+    row = _write_table(
+        ws, row, ["Section", "Passed", "Warnings", "Failed"], summary_rows,
+        col_widths=SHEET_COL_WIDTHS, freeze=False,
+    )
+    ws.cell(row=row, column=1, value="Overall").font = Font(
+        name=FONT_NAME, size=11, bold=True, color="1C2B4A")
+    verdict = ws.cell(row=row, column=2, value=overall)
+    verdict.fill = STATUS_FILL.get(overall, STATUS_FILL["Warn"])
+    verdict.font = STATUS_FONT.get(overall, BODY_FONT)
+    verdict.border = THIN_BORDER
+    verdict.alignment = CENTER_ALIGN
+    row += 2
+
+    # ---- content --------------------------------------------------------
+    row = _write_section_heading(
+        ws, row, "CONTENT QA",
+        "Every line of the dealer's Excel panel must appear in the email.")
+    row = _write_counts_line(ws, row, "Totals", content_counts)
+    content_rows = [
+        [r.get("item", ""), r.get("status", ""), str(r.get("detail", "") or "")]
+        for _, r in content_df.iterrows()
+    ] if len(content_df) else []
+    if content_rows:
+        row = _write_table(ws, row, ["Item", "Status", "Detail"], content_rows,
+                           status_col_indexes=[2], col_widths=SHEET_COL_WIDTHS, freeze=False)
+    else:
+        row = _write_empty_note(ws, row, "No content checks were produced for this email.")
     row += 1
 
-    detail_headers = ["Module", "Category", "Rule", "Status", "Detail", "Expected", "Found"]
+    # ---- styling --------------------------------------------------------
+    row = _write_section_heading(
+        ws, row, "STYLING QA",
+        "Fonts, colours, spacing, bold rules, links and image weight.")
+    row = _write_counts_line(ws, row, "Totals", style_counts)
+    style_rows = [
+        [r.get("rule", ""), r.get("severity", ""), str(r.get("detail", "") or "")]
+        for _, r in style_df.iterrows()
+    ] if len(style_df) else []
+    if style_rows:
+        row = _write_table(ws, row, ["Rule", "Severity", "Detail"], style_rows,
+                           status_col_indexes=[2], col_widths=SHEET_COL_WIDTHS, freeze=False)
+    else:
+        row = _write_empty_note(ws, row, "No styling checks were produced for this email.")
+    row += 1
+
+    # ---- advanced -------------------------------------------------------
+    row = _write_section_heading(
+        ws, row, "ADVANCED QA",
+        "Banner, Body, Dealer Name and OCR checks against the Master reference.")
+    if not module_results:
+        _write_empty_note(
+            ws, row,
+            "Advanced QA did not run for this email — switch on 'Enable Advanced QA "
+            "(Body / Banner / OCR)' in Validation Options before running.")
+        return
+
+    row = _write_counts_line(ws, row, "Totals", adv_counts)
+    module_rows = []
+    for mr in module_results:
+        p, f, w = mr.counts()
+        module_rows.append([mr.module_name, mr.overall_status(), f"Passed {p} · Warnings {w} · Failed {f}"])
+    row = _write_table(ws, row, ["Module", "Status", "Counts"], module_rows,
+                       status_col_indexes=[2], col_widths=SHEET_COL_WIDTHS, freeze=False)
+    row += 1
+
     detail_rows = []
     for mr in module_results:
         for item in mr.items:
+            explanation = item.detail or ""
+            if item.expected or item.found:
+                explanation = (
+                    f"{explanation}\n"
+                    f"Expected: {item.expected}\n"
+                    f"Found: {item.found}"
+                ).strip()
             detail_rows.append([
-                mr.module_name, item.category, item.rule, item.status,
-                item.detail, item.expected, item.found,
+                f"{mr.module_name} — {item.rule}" if item.rule else mr.module_name,
+                item.status,
+                explanation,
             ])
-
     if detail_rows:
-        _write_table(
-            ws, row, detail_headers, detail_rows,
-            status_col_indexes=[4], col_widths=[22, 16, 22, 12, 50, 30, 30],
-        )
+        ws.cell(row=row, column=1, value="Detailed checks").font = SECTION_FONT
+        row += 1
+        _write_table(ws, row, ["Check", "Status", "Detail"], detail_rows,
+                     status_col_indexes=[2], col_widths=SHEET_COL_WIDTHS, freeze=False)
     else:
-        ws.cell(row=row, column=1, value="No individual check items were recorded (all inputs empty/disabled).").font = BODY_FONT
+        _write_empty_note(
+            ws, row,
+            "No individual check items were recorded (all inputs empty or disabled).")
+
+
+def _write_empty_note(ws: Worksheet, row: int, text: str) -> int:
+    ws.cell(row=row, column=1, value=text).font = Font(
+        name=FONT_NAME, size=10, italic=True, color="767676")
+    return row + 1
 
 
 # =========================================================
@@ -333,16 +455,10 @@ def build_qa_workbook(jobs: List[JobReportData]) -> bytes:
 
     used_names: Dict[str, int] = {"Overview": 0}
     for job in jobs:
-        base = job.job_name or "Email"
-
-        content_sheet_name = _sanitize_sheet_name(f"{base} - Content", used_names)
-        _build_content_sheet(wb, job, content_sheet_name)
-
-        style_sheet_name = _sanitize_sheet_name(f"{base} - Style", used_names)
-        _build_style_sheet(wb, job, style_sheet_name)
-
-        adv_sheet_name = _sanitize_sheet_name(f"{base} - Advanced QA", used_names)
-        _build_advanced_sheet(wb, job, adv_sheet_name)
+        # ONE sheet per model. Three sheets each turned a nine-model run
+        # into twenty-eight tabs; everything for a model now reads down a
+        # single sheet instead.
+        _build_model_sheet(wb, job, _sanitize_sheet_name(job.job_name or "Email", used_names))
 
     buf = BytesIO()
     wb.save(buf)
