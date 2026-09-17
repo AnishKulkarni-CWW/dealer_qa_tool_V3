@@ -41,6 +41,8 @@ except ImportError:
     ext_website_link_qa = None
 from modules import multi_master as ext_multi_master
 from modules import master_pdf_multi as ext_master_pdf_multi
+from modules import master_image_multi as ext_master_image_multi
+from modules import model_bundle as ext_model_bundle
 
 # OCR engine preference is fixed (was previously a sidebar radio choice).
 # PaddleOCR is preferred, with automatic silent fallback to Tesseract if
@@ -767,60 +769,97 @@ def raw_line_text_from_html(html_raw: str, source_line: str) -> Optional[str]:
     return raw_value
 
 
-def diff_exact_spacing(expected: str, found: str) -> str:
+def describe_exact_mismatch(expected: str, found: str) -> Tuple[str, set]:
     """
-    Human-readable note on where `found`'s internal spacing/casing
-    diverges from `expected` — used in the exact-match QA detail column
-    so a person can see precisely what to fix rather than just "mismatch".
-    Covers three independent kinds of divergence, checked in this order:
-      1. Spacing: found has a different number of space-separated words
-         than expected (catches BOTH an added space bar that splits one
-         word into two, AND a missing space bar that merges two words
-         into one — not just multi-space runs).
-      2. Multi-space runs: even when word count matches, an extra/missing
-         space WITHIN a run (single vs double space between the same two
-         words) is called out specifically.
-      3. Casing: same words, same spacing, different letter case.
-    A line can have more than one of these at once; all applicable notes
-    are included. (The current caller only invokes this when the strings
-    are already known to differ, but the guard below keeps this function
-    correct on its own terms rather than relying on that.)
+    Explains how `found` diverges from `expected`, and classifies it.
+
+    Returns `(note, kinds)` where `kinds` is a set drawn from
+    {"spacing", "casing", "text"} — the caller uses it to decide
+    severity. Spacing on its own is a warning: a stray or missing space
+    bar is a real defect worth reporting, but it is a typographic one,
+    and calling it a failure buried genuinely wrong copy among rows of
+    whitespace nits. Casing, or text that actually differs, stays a
+    failure.
+
+    The three kinds:
+      * "spacing" — the same characters, laid out differently. Covers an
+        added space bar that splits one word in two, a missing one that
+        merges two words into one, and a single-vs-double space between
+        the same two words.
+      * "casing" — the same characters and spacing, different letter case.
+      * "text" — the wording itself differs; no amount of respacing or
+        recasing would make the two match.
+    A line can be both mis-spaced and mis-cased at once, in which case
+    both notes are included and the caller fails it. (The current caller
+    only invokes this when the strings are already known to differ, but
+    the guard below keeps this function correct on its own terms.)
     """
-    if expected.strip() == found.strip():
-        return "No difference — strings are identical."
+    e_s, f_s = expected.strip(), found.strip()
+    if e_s == f_s:
+        return "No difference — strings are identical.", set()
 
-    notes = []
-    expected_words = expected.strip().split(" ")
-    found_words = found.strip().split(" ")
+    # Take case out of the comparison first, then ask what is left. If the
+    # two strings still differ but their non-space characters match, the
+    # difference IS the spacing; if the non-space characters differ too,
+    # the wording itself is wrong and no amount of respacing fixes it.
+    e_c, f_c = e_s.casefold(), f_s.casefold()
+    e_ns, f_ns = _collapse_spaces(e_s), _collapse_spaces(f_s)
+    e_nsc, f_nsc = _collapse_spaces(e_c), _collapse_spaces(f_c)
 
-    if len(expected_words) != len(found_words):
-        # Word count differs -- catches a missing space merging two words
-        # ("BirdAutomotive") as well as a stray space splitting one word
-        # into two ("Auto motive"), even when neither involves a {2,}
-        # multi-space run anywhere in the line.
+    kinds: set = set()
+    notes: List[str] = []
+
+    expected_words = e_s.split()
+    found_words = f_s.split()
+
+    if e_nsc != f_nsc:
+        kinds.add("text")
+        count_note = (
+            f" ({len(found_words)} word(s) found vs {len(expected_words)} expected)"
+            if len(found_words) != len(expected_words) else ""
+        )
         notes.append(
-            "Spacing does not match the Excel reference — the number/position of space bars "
-            "between words/characters differs from the source line "
-            f"({len(found_words)} word(s) found vs {len(expected_words)} expected)."
+            "Text does not match the Excel reference — the wording itself differs"
+            f"{count_note}. Found: \"{f_s[:120]}\"."
         )
     else:
-        expected_multi = re.findall(r" {2,}", expected)
-        found_multi = re.findall(r" {2,}", found)
-        if found_multi != expected_multi:
+        # Same characters, so anything left is spacing and/or casing.
+        if e_c != f_c:
+            kinds.add("spacing")
+            if len(expected_words) != len(found_words):
+                notes.append(
+                    "Spacing does not match the Excel reference — the number/position of space "
+                    "bars between words/characters differs from the source line "
+                    f"({len(found_words)} word(s) found vs {len(expected_words)} expected)."
+                )
+            else:
+                notes.append(
+                    "Spacing does not match the Excel reference — the number of consecutive "
+                    "spaces at one or more points differs from the source line."
+                )
+        if e_ns != f_ns:
+            kinds.add("casing")
             notes.append(
-                "Spacing does not match the Excel reference — the number of consecutive spaces "
-                "at one or more points differs from the source line."
+                "Casing does not match the Excel reference — one or more letters that should be "
+                "uppercase are lowercase (or vice-versa)."
             )
 
-    if expected.strip().casefold() == found.strip().casefold() and expected.strip() != found.strip():
-        notes.append(
-            "Casing does not match the Excel reference — one or more letters that should be "
-            "uppercase are lowercase (or vice-versa)."
-        )
-
     if not notes:
+        kinds.add("text")
         notes.append("Text differs from the Excel reference.")
-    return " ".join(notes)
+    return " ".join(notes), kinds
+
+
+def _collapse_spaces(text: str) -> str:
+    """The line with every run of whitespace removed, so two strings that
+    differ ONLY in spacing compare equal."""
+    return re.sub(r"\s+", "", text or "")
+
+
+def diff_exact_spacing(expected: str, found: str) -> str:
+    """The note on its own, for callers that do not need the
+    classification."""
+    return describe_exact_mismatch(expected, found)[0]
 
 
 def classify_expected_phone_format(excel_line: str, config) -> Optional[str]:
@@ -1079,7 +1118,11 @@ def run_dealer_panel_exact_match_qa(panel_lines: List[str], html_raw: str, confi
                 f"\"{found.strip()[:120]}\". Casing and spacing themselves are correct."
             )
         else:
-            status, detail = "Fail", diff_exact_spacing(compare_target, found)
+            detail, kinds = describe_exact_mismatch(compare_target, found)
+            # Spacing on its own is a typographic defect, not wrong copy:
+            # still reported, but as a warning. Anything that changes the
+            # words themselves or their casing is still a failure.
+            status = "Warn" if kinds == {"spacing"} else "Fail"
         rows.append({
             "item": f"Exact match: {line}"[:120],
             "status": status,
@@ -1927,28 +1970,18 @@ def compare_source_to_html(source_lines: List[str], html_raw: str) -> pd.DataFra
 
 def extract_model_zip(uploaded_zip) -> Tuple[Optional[str], Dict[str, int]]:
     """
-    Given a zip of a model's email folder (containing an index.html /
-    *.html file and an images/ subfolder), returns (html_text, image_sizes).
+    The first email inside a model zip, as (html_text, image_sizes).
+
+    Kept for callers that only ever want one email out of a zip. The
+    upload path itself goes through `modules/model_bundle.extract_models`,
+    which returns EVERY model in the zip — a campaign is delivered as one
+    zip holding a folder per model, nested inside a wrapper directory or
+    two, and each of those folders is its own email.
     """
-    zf = zipfile.ZipFile(uploaded_zip)
-    html_text = None
-    image_sizes: Dict[str, int] = {}
-
-    html_candidates = [zi for zi in zf.infolist() if zi.filename.lower().endswith((".html", ".htm")) and not zi.is_dir()]
-    html_candidates.sort(key=lambda zi: (0 if zi.filename.lower().endswith("index.html") else 1, len(zi.filename)))
-
-    if html_candidates:
-        with zf.open(html_candidates[0]) as f:
-            html_text = f.read().decode("utf-8", errors="ignore")
-
-    for zi in zf.infolist():
-        if zi.is_dir():
-            continue
-        if zi.filename.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")):
-            base = zi.filename.split("/")[-1].lower()
-            image_sizes[base] = zi.file_size
-
-    return html_text, image_sizes
+    models, _note = ext_model_bundle.extract_models(uploaded_zip, "")
+    if not models:
+        return None, {}
+    return models[0].html, models[0].image_sizes
 
 
 
@@ -1994,13 +2027,6 @@ def _cached_emailer_index(pdf_bytes: bytes):
 #    hidden by CSS (ext_theme.hidden) when another view is on screen.
 # ---------------------------------------------------------------
 
-_OCR_LABELS = {
-    "paddleocr": "PaddleOCR",
-    "tesseract": "Tesseract",
-    "rapidocr": "RapidOCR",
-    "none": "Not installed",
-}
-
 # ---- Navigation rail ------------------------------------------------
 # There is no separate "QA Validation" view. It rendered the identical
 # workflow to Home minus the welcome panel — a second door into the same
@@ -2045,15 +2071,6 @@ if ext_view == "settings":
     ext_theme.section_title(
         "Settings", "Preferences for this browser session", "settings")
 
-    # Which OCR engine this install actually found. Probed here rather
-    # than at the top of the script because Settings is the only thing
-    # that reports it, and a page that never opens Settings has no reason
-    # to pay for the check.
-    try:
-        _nav_ocr_ok, _nav_ocr_engine, _nav_ocr_msg = ext_ocr.ocr_status()
-    except Exception:
-        _nav_ocr_ok, _nav_ocr_engine, _nav_ocr_msg = False, "none", ""
-
     _set_a, _set_b = st.columns(2, gap="large")
 
     with _set_a:
@@ -2097,25 +2114,6 @@ if ext_view == "settings":
                 st.rerun()
 
     with _set_b:
-        with ext_theme.section("content", "Environment",
-                               "What this install can and cannot do"):
-            st.markdown(
-                f'<div class="dq-kv">'
-                f'<div class="dq-kv-item"><b>Banner OCR</b> · '
-                f'{html_escape_module.escape(_OCR_LABELS.get(_nav_ocr_engine, _nav_ocr_engine))}</div>'
-                f'<div class="dq-kv-item"><b>Excel sheet</b> · Mailers - NSC </div>'
-                f'<div class="dq-kv-item"><b>Website link QA</b> · '
-                f'{"available" if ext_website_link_qa is not None else "module missing"}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-            if _nav_ocr_msg:
-                ext_theme.banner(
-                    html_escape_module.escape(_nav_ocr_msg),
-                    "ok" if _nav_ocr_ok else "warn",
-                    "check-circle" if _nav_ocr_ok else "alert-triangle",
-                )
-
         with ext_theme.section("style", "QA thresholds",
                                "Read-only — defined in modules/config.py"):
             _cfg_rows = []
@@ -2193,20 +2191,35 @@ if ext_view == "help":
                   <li><b>Double spaces</b> anywhere in the copy.</li>
                   <li><b>Punctuation spacing</b> — a space before a comma or full
                       stop, a missing space after one.</li>
+                  <li><b>Spacing against the Excel line</b> — a stray or missing space
+                      bar. Reported as a <b>warning</b>, not a failure: it is a
+                      typographic defect, and failing it buried genuinely wrong copy.
+                      Wrong words or wrong casing are still failures.</li>
                   <li><b>Image weight</b> — any image over 300&nbsp;KB, when the
                       images are supplied (model .zip, or an images .zip).</li>
                 </ul>
 
                 <div class="dq-help-h">4 · Website &amp; CTA link QA</div>
                 <ul class="dq-help-ul">
-                  <li>The panel's own <b>"Website:" line</b> belongs to this dealer's
-                      domain.</li>
+                  <li>The panel's own <b>"Website:" line</b> belongs to this dealer.</li>
                   <li>The <b>CTA button's <code>href</code></b> belongs to the same
-                      dealer's domain.</li>
+                      dealer.</li>
                   <li>The two <b>agree with each other</b>.</li>
                 </ul>
-                <p class="dq-help-p">Matched by domain, not by exact URL — a deep
-                link to a model page still passes.</p>
+                <p class="dq-help-p">A link is the dealer's if their name is in it,
+                wherever in it that is — all three of these pass:</p>
+                <ul class="dq-help-ul">
+                  <li>in the domain — <code>bmw-birdautomotive.in</code></li>
+                  <li>in a branch domain —
+                      <code>bmw-deutschemotoren-bengaluru.in</code>, the same dealer as
+                      <code>bmw-deutschemotoren.in</code></li>
+                  <li>in the link's path —
+                      <code>bmwusedcars.in/bavaria-motors</code>, the dealer's page on a
+                      shared BMW property</li>
+                </ul>
+                <p class="dq-help-p">A deep link to a model page still passes, and the
+                CTA and the panel agree when they share a domain, when one is a branch
+                of the other, or when both carry this dealer's name.</p>
                 """,
                 unsafe_allow_html=True,
             )
@@ -2222,6 +2235,12 @@ if ext_view == "help":
                 <b>Master</b> — a Master JPG, a Master PDF bulletin, a Master HTML
                 zip, or text you type in. Without a Master there is nothing to
                 compare against and each check reports that rather than guessing.</p>
+                <p class="dq-help-p"><b>One master per model, without a bulletin PDF.</b>
+                Upload the master images together and each is routed to the model named
+                in its own file name — <code>..._Sep26 X3.png</code> goes to the X3 —
+                exactly as a bulletin's pages are routed. A campaign zip that carries
+                its own creative beside each index.html is picked up the same way; an
+                image you uploaded wins where both name the same model.</p>
 
                 <div class="dq-help-h">5 · Banner Text QA</div>
                 <p class="dq-help-p">The banner is pixels, so its words are read by
@@ -2309,7 +2328,9 @@ if ext_view == "help":
                       <b>HTML file(s)</b>, or a <b>model folder .zip</b>
                       (index.html + images/). The zip route is the better one:
                       it also enables the 300&nbsp;KB image-size check and lets
-                      Banner QA read the banner's actual pixels.</li>
+                      Banner QA read the banner's actual pixels. One zip holding a
+                      folder per model works too — the tool walks into it however
+                      deeply the folders are nested and QAs each model separately.</li>
                   <li><b>Set the options.</b> Choosing a dealer makes that
                       dealer authoritative for the whole run; leaving it on
                       automatic detects each email's dealer from its own HTML.</li>
@@ -2520,28 +2541,39 @@ with ext_theme.hidden(not ext_workflow_visible):
                         })
             else:
                 model_zips = st.file_uploader(
-                    "Model folder(s) as .zip", type=["zip"], accept_multiple_files=True)
+                    "Model folder(s) as .zip", type=["zip"], accept_multiple_files=True,
+                    help="One zip per model, or a single campaign zip holding a folder "
+                         "per model — however deeply the folders are nested.")
                 if model_zips:
                     for mz in model_zips:
                         try:
-                            html_text, image_sizes = extract_model_zip(mz)
+                            _bundled, _note = ext_model_bundle.extract_models(
+                                BytesIO(mz.getvalue()), mz.name)
                         except Exception as e:
                             st.error(f"Could not read '{mz.name}': {e}")
                             continue
-                        if not html_text:
-                            st.error(f"No HTML file found inside '{mz.name}'.")
+                        if not _bundled:
+                            st.error(_note or f"No HTML file found inside '{mz.name}'.")
                             continue
-                        email_jobs.append({
-                            "name": mz.name,
-                            "html": html_text,
-                            "images": image_sizes,
-                            # Raw zip bytes kept so Banner QA can pull the actual
-                            # banner pixels out of the model folder's images/
-                            # directory. Stored as bytes rather than the uploaded
-                            # file object because zipfile consumes the stream and
-                            # several jobs read from it in the same run.
-                            "images_zip_bytes": mz.getvalue(),
-                        })
+                        if len(_bundled) > 1:
+                            st.success(_note)
+                        for _m in _bundled:
+                            email_jobs.append({
+                                "name": _m.name,
+                                "html": _m.html,
+                                "images": _m.image_sizes,
+                                # Raw zip bytes kept so Banner QA can pull the actual
+                                # banner pixels out of the model folder's images/
+                                # directory. For a campaign zip this is a zip of
+                                # THAT model's folder alone, rooted at the folder,
+                                # so `images/...` in the HTML resolves the same way
+                                # it does for a single-model zip.
+                                "images_zip_bytes": _m.zip_bytes,
+                                # Image files sitting beside index.html rather than
+                                # inside images/ — the approved creative for this
+                                # model. Offered to the master-image router below.
+                                "bundled_masters": _m.master_images,
+                            })
 
             if email_jobs:
                 st.markdown(
@@ -2732,10 +2764,20 @@ with ext_theme.hidden(not ext_workflow_visible):
     with ext_master_col_b:
         with ext_theme.section(
             "image", "Master Image (JPG)",
-            "A full email screenshot — cropped to the banner automatically",
+            "A full email screenshot — cropped to the banner automatically. "
+            "Upload one per model and each is routed by the model named in its file name.",
         ):
-            ext_master_jpg_upload = st.file_uploader(
-                "Master JPG", type=["jpg", "jpeg", "png"], key=f"ext_master_jpg_{_master_nonce}",
+            ext_master_jpg_uploads = st.file_uploader(
+                "Master JPG", type=["jpg", "jpeg", "png"],
+                key=f"ext_master_jpg_{_master_nonce}", accept_multiple_files=True,
+                help="One image is used for every adapt. Several are matched to their "
+                     "models by file name — '..._Sep26 X3.png' goes to the X3 — the same "
+                     "way a master PDF's pages are routed.",
+            ) or []
+            # One upload keeps behaving as the single global Master it
+            # always was; several are routed per model below.
+            ext_master_jpg_upload = (
+                ext_master_jpg_uploads[0] if len(ext_master_jpg_uploads) == 1 else None
             )
 
         with ext_theme.section(
@@ -2782,8 +2824,51 @@ with ext_theme.hidden(not ext_workflow_visible):
             ext_pdf_emailer_index = None
             st.warning(f"Could not scan the Master PDF for multiple emailer pages: {e}")
 
+    # ---- Master images, routed per model ----------------------------
+    # Uploaded files first, then any creative a campaign zip carried
+    # beside its own index.html; `by_code` prefers the uploaded one on a
+    # tie, because uploading it was a deliberate act.
+    ext_master_image_index = ext_master_image_multi.index_master_images(
+        [(f.name, f.getvalue()) for f in ext_master_jpg_uploads])
+    _ext_bundled_masters = [
+        (name, data)
+        for job in email_jobs
+        for name, data in (job.get("bundled_masters") or [])
+    ]
+    if _ext_bundled_masters:
+        ext_master_image_index = ext_master_image_multi.index_master_images(
+            _ext_bundled_masters, origin="bundle",
+            existing=ext_master_image_index)
+
+    ext_master_image_auto_map = {}
+    if len(ext_master_image_index.entries) > 1 and email_jobs:
+        ext_master_image_auto_map = ext_master_image_multi.build_auto_map(
+            email_jobs, ext_master_image_index)
+
     ext_multi_assignments = {}
     _ext_job_names = [j["name"] for j in email_jobs]
+
+    if ext_master_image_auto_map:
+        with ext_theme.section(
+            "image", "Master Images — Model Routing",
+            ext_master_image_index.note,
+        ):
+            _img_rows = []
+            for _jname in _ext_job_names:
+                _entry, _reason = ext_master_image_auto_map.get(_jname, (None, ""))
+                _img_rows.append({
+                    "Adapt": _jname,
+                    "Master image": _entry.file_name if _entry else "— not matched —",
+                    "Model": _entry.model_label if _entry else "",
+                    "How it was matched": _reason,
+                })
+            if _img_rows:
+                st.dataframe(_img_rows, use_container_width=True, hide_index=True)
+            st.caption(
+                "Each adapt takes the master image whose file name names the same model. "
+                "Anything routed incorrectly can be overridden per adapt in the "
+                "Per-Adapt Masters card below, which always wins."
+            )
 
     if ext_pdf_emailer_index is not None and ext_pdf_emailer_index.entries:
         with ext_theme.section(
@@ -3163,9 +3248,24 @@ with ext_theme.hidden(not ext_workflow_visible):
                         # ---------------------------------------------------------
                         _assign = ext_multi_assignments.get(job["name"])
 
+                        # Master JPG for this adapt, most specific first:
+                        # a per-adapt override, then the master image whose
+                        # file name names this adapt's model, then a single
+                        # global Master JPG.
+                        _routed_master_img = (
+                            ext_master_image_auto_map.get(job["name"]) or (None, "")
+                        )[0]
                         if _assign is not None and _assign.jpg_bytes:
                             job_master_jpg = _assign.jpg_file()
                             job_master_jpg_origin = f"per-adapt Master JPG ({_assign.jpg_name})"
+                        elif _routed_master_img is not None:
+                            job_master_jpg = BytesIO(_routed_master_img.data)
+                            job_master_jpg_origin = (
+                                f"Master image '{_routed_master_img.file_name}' "
+                                f"(routed to {_routed_master_img.model_label}"
+                                + (" from the campaign zip)"
+                                   if _routed_master_img.origin == "bundle" else ")")
+                            )
                         elif ext_master_jpg_upload is not None:
                             job_master_jpg = BytesIO(ext_master_jpg_upload.getvalue())
                             job_master_jpg_origin = "global Master JPG"
