@@ -141,6 +141,21 @@ streamlit run app.py
     used when it is decisively the better read, so every page of a real
     bulletin deck still reads exactly as it did.
 
+14c. **Campaign zips, any depth** — a zip may hold one email, or a folder
+    per model nested inside a wrapper directory or two. The tool looks for
+    the thing that identifies a model folder — an HTML file — wherever it
+    sits, treats each one's directory as a model, and re-zips that folder
+    as its own root so `images/...` resolves exactly as it does for a
+    single-email zip. Each model becomes its own adapt in the run.
+
+14d. **One master image per model** — without a bulletin PDF, upload the
+    master creatives together and each is routed to the model named in its
+    own file name (`..._Sep26 X3.png` → the X3), using the same matcher
+    that routes a bulletin's pages. A campaign zip carrying its own
+    creative beside each `index.html` feeds the same index; an uploaded
+    image wins where both name the same model, and a per-adapt Master
+    always wins over both.
+
 15. **Tabbed results** — every QA section renders as KPI tiles (total /
     passed / failed / warnings) above a tabbed record table: Issues /
     Warnings / Passed / All records, plus an Expand button that opens the
@@ -161,6 +176,12 @@ streamlit run app.py
     rows are added directly below the existing "Website: ..." row in the
     Content QA table: Dealer Panel Website vs dealer name, CTA Button
     Link vs dealer name, and CTA Button Link vs Dealer Panel Website.
+    A link counts as the dealer's when their name appears anywhere in it —
+    in the domain, in a branch domain (`bmw-deutschemotoren-bengaluru.in`
+    is the same dealer as `bmw-deutschemotoren.in`), or in the link's path
+    (`bmwusedcars.in/bavaria-motors`, the dealer's page on a shared BMW
+    property). The CTA and the panel agree when they share a domain, when
+    one is a branch of the other, or when both carry the dealer's name.
 
 To use the Advanced QA tabs, switch on **"Enable Advanced QA (Body /
 Banner / OCR)"** in the **Validation Options** card. Left off, the run
@@ -189,6 +210,8 @@ modules/
   banner_text_qa.py                 (11) banner text word-diff QA
   body_qa.py                         (12)(13) body dealer check + As-Is/To-Be diff
   priority.py                         (14) master-source priority resolver
+  model_bundle.py                       (14c) every model email inside a zip
+  master_image_multi.py                 (14d) routes master images to models
   results_ui.py                        (15) the one shared result-table renderer
   excel_report.py                       (17) the consolidated workbook —
                                              Overview plus ONE sheet per model

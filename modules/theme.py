@@ -253,6 +253,56 @@ header[data-testid="stHeader"] [data-testid="stToolbar"] {{
     right:.6rem; top:.35rem;
 }}
 [data-testid="stDecoration"] {{ display:none !important; }}
+
+/* ---- the running indicator ----
+   Streamlit's own "Running..." chip lives in the top-right toolbar, where
+   it is easy to miss on a wide screen and scrolls out of reach on a long
+   report. It is replaced by a bar pinned to the very top of the viewport,
+   centred, that shows for exactly as long as the app is busy.
+
+   There is no event to hook: the chip exists in the DOM only while a run
+   is in flight, so `body:has(...)` IS the "is it running" test, and the
+   bar is styled off the presence of the thing it replaces. */
+[data-testid="stStatusWidget"] {{ display:none !important; }}
+
+.dq-topload {{
+    position:fixed; top:0; left:0; right:0; z-index:1000001;
+    display:flex; flex-direction:column; align-items:center; gap:.32rem;
+    padding-top:.5rem; pointer-events:none;
+    opacity:0; transform:translateY(-8px);
+    transition:opacity .18s ease, transform .18s ease;
+}}
+body:has([data-testid="stStatusWidget"]) .dq-topload {{
+    opacity:1; transform:none;
+}}
+.dq-topload-track {{
+    width:min(440px, 56vw); height:4px; border-radius:999px;
+    background:{BRAND_TINT}; overflow:hidden;
+    box-shadow:0 1px 3px rgba(16,24,40,.12);
+}}
+.dq-topload-bar {{
+    height:100%; width:36%; border-radius:999px;
+    background:linear-gradient(90deg,{BRAND_TINT} 0%,{BRAND} 45%,{BRAND_DEEP} 65%,{BRAND_TINT} 100%);
+    animation:dq-topload-slide 1.05s ease-in-out infinite;
+}}
+@keyframes dq-topload-slide {{
+    0%   {{ transform:translateX(-115%); }}
+    100% {{ transform:translateX(395%); }}
+}}
+.dq-topload-text {{
+    font-size:.685rem; font-weight:800; letter-spacing:.1em; text-transform:uppercase;
+    color:{BRAND_DARK}; background:rgba(255,255,255,.94);
+    border:1px solid {BRAND_LINE}; border-radius:999px; padding:.14rem .6rem;
+    box-shadow:0 2px 8px -3px rgba(16,24,40,.25);
+}}
+/* The element is `fixed`, so it contributes no height of its own; this
+   stops its (empty) Streamlit container from adding a gap to the page. */
+[data-testid="stElementContainer"]:has(> .dq-topload) {{
+    height:0 !important; min-height:0 !important; margin:0 !important;
+}}
+@media (prefers-reduced-motion: reduce) {{
+    .dq-topload-bar {{ animation-duration:2.4s; }}
+}}
 [data-testid="stAppDeployButton"], [data-testid="stAppDeployButton"] + div {{ display:none !important; }}
 footer, #MainMenu {{ visibility:hidden; }}
 
@@ -1084,9 +1134,21 @@ details.oq-details > summary:hover {{ background:{CANVAS}; color:{BRAND_DARK}; }
 """
 
 
+# The running indicator's markup. Rendered once, next to the stylesheet;
+# CSS decides when it is visible (see the .dq-topload rules).
+_TOP_PROGRESS = (
+    '<div class="dq-topload" aria-hidden="true">'
+    '<div class="dq-topload-track"><div class="dq-topload-bar"></div></div>'
+    '<div class="dq-topload-text">Working</div>'
+    '</div>'
+)
+
+
 def inject(density: str = "comfortable") -> None:
-    """Injects the whole stylesheet. Call once, first thing in the app."""
+    """Injects the whole stylesheet, and the top progress bar that replaces
+    Streamlit's own running indicator. Call once, first thing in the app."""
     st.markdown(_css(density), unsafe_allow_html=True)
+    st.markdown(_TOP_PROGRESS, unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------

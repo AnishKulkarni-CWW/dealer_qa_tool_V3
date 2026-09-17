@@ -29,9 +29,26 @@ domain plausibly belong to the selected dealer (derived from the dealer
 NAME, since that's the only independent source of truth available)?
 
 --------------------------------------------------------------------------
-Dealer-name -> domain plausibility check
+Dealer-name -> link plausibility check
 --------------------------------------------------------------------------
-Every real domain in the sample sheet follows the same shape:
+A dealer's link is theirs if their NAME is in it. Where in it varies, and
+all three of these shapes are correct and appear in real emails:
+
+  * in the domain          www.bmw-birdautomotive.in
+  * in a BRANCH domain     www.bmw-deutschemotoren-bengaluru.in
+                           (the same dealer as bmw-deutschemotoren.in)
+  * in the link's PATH     https://www.bmwusedcars.in/bavaria-motors
+                           (the dealer's page on a shared BMW property)
+
+Matching the domain alone — which is what this module used to do —
+failed the last two outright. So the dealer's name is looked for across
+the whole link, and the cross-check between the CTA and the panel accepts
+a branch domain, or two different domains that BOTH carry the dealer's
+name, as agreement.
+
+
+For the panel's own "Website:" line, every real domain in the sample
+sheet follows the same shape:
 "bmw-<slug of dealer name>[-<city/branch>].in" (or occasionally
 ".in/" or no "bmw-" prefix, but always containing a normalized form of
 the dealer's name as a substring) — e.g. "Bird Automotive" ->
@@ -48,8 +65,9 @@ Three independent sub-checks are produced (each becomes a row in Content
 QA):
   1. Dealer Panel Website domain contains the dealer's own name.
   2. CTA Button Link domain contains the dealer's own name.
-  3. CTA Button Link domain == Dealer Panel Website domain (the two
-     should agree with each other, regardless of #1/#2 individually).
+  3. CTA Button Link and Dealer Panel Website agree — same domain, one a
+     branch of the other, or two domains that both carry this dealer's
+     name (regardless of #1/#2 individually).
 
 Any of these can fail independently — e.g. the CTA could correctly point
 to the dealer's own site while the panel's Website line has a typo, or
@@ -59,7 +77,7 @@ dealer's) domain.
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from bs4 import BeautifulSoup, Tag
 
@@ -99,6 +117,67 @@ def _extract_domain(url: str) -> Optional[str]:
     return u
 
 
+# Public suffixes that take two labels, so the "core" of a domain is what
+# is left once the suffix is removed. Anything not listed loses one label.
+_TWO_LABEL_SUFFIXES = (
+    ".co.in", ".net.in", ".org.in", ".gov.in", ".ac.in", ".co.uk",
+    ".org.uk", ".com.au", ".co.nz", ".com.sg",
+)
+
+
+def _domain_core(domain: Optional[str]) -> str:
+    """A domain with its public suffix stripped and reduced to letters and
+    digits: 'bmw-deutschemotoren-bengaluru.in' -> 'bmwdeutschemotorenbengaluru'."""
+    if not domain:
+        return ""
+    d = domain.lower().rstrip(".")
+    for suffix in _TWO_LABEL_SUFFIXES:
+        if d.endswith(suffix):
+            d = d[: -len(suffix)]
+            break
+    else:
+        if "." in d:
+            d = d.rsplit(".", 1)[0]
+    return re.sub(r"[^a-z0-9]", "", d)
+
+
+def _url_letters(url: Optional[str]) -> str:
+    """The WHOLE link reduced to letters and digits — host, path and all.
+
+    The host alone is not enough. A dealer's CTA is routinely a page ABOUT
+    that dealer on a shared BMW property, e.g.
+    'https://www.bmwusedcars.in/bavaria-motors': the host names the
+    property and the PATH names the dealer. Matching the host only failed
+    every one of those, so the dealer's name is looked for across the
+    entire link.
+    """
+    if not url:
+        return ""
+    u = re.sub(r"^[a-z]+://", "", str(url).strip().lower())
+    u = u.split("?")[0].split("#")[0]
+    return re.sub(r"[^a-z0-9]", "", u)
+
+
+def _dealer_name_in_url(url: Optional[str], dealer_name: str) -> Tuple[bool, str]:
+    """Does this link belong to `dealer_name`, and on what evidence?
+
+    Returns (matched, where) with `where` one of "domain", "link" or "".
+    The distinction is reported to the reviewer, because "the dealer's
+    name is in the domain" and "the dealer's name is further along the
+    link" are different degrees of confidence and they should be able to
+    see which one they got.
+    """
+    slug = _normalize_dealer_slug(dealer_name)
+    if not slug or not url:
+        return False, ""
+    domain = _extract_domain(url)
+    if domain and slug in re.sub(r"[^a-z0-9]", "", domain):
+        return True, "domain"
+    if slug in _url_letters(url):
+        return True, "link"
+    return False, ""
+
+
 def _domain_matches_dealer(domain: Optional[str], dealer_name: str) -> bool:
     if not domain:
         return False
@@ -107,6 +186,25 @@ def _domain_matches_dealer(domain: Optional[str], dealer_name: str) -> bool:
         return False
     domain_letters = re.sub(r"[^a-z0-9]", "", domain)
     return slug in domain_letters
+
+
+def _domains_same_dealer(a: Optional[str], b: Optional[str]) -> Tuple[bool, str]:
+    """Do two domains belong to the same dealer?
+
+    Equal domains obviously do. So does a branch domain that EXTENDS the
+    other — 'bmw-deutschemotoren-bengaluru.in' against
+    'bmw-deutschemotoren.in' — which is how dealers with more than one
+    outlet are actually set up, and which a straight equality test failed.
+    Returns (same, reason_fragment).
+    """
+    if not a or not b:
+        return False, ""
+    if a == b:
+        return True, "matches"
+    core_a, core_b = _domain_core(a), _domain_core(b)
+    if core_a and core_b and (core_a in core_b or core_b in core_a):
+        return True, "is a branch of the same domain as"
+    return False, ""
 
 
 def _find_dealer_panel_website_line(panel_text: str) -> Optional[str]:
@@ -147,16 +245,6 @@ def find_cta_button_href(html_raw: str) -> Optional[str]:
     return None
 
 
-def run_website_link_qa(dealer_name: str, panel_text: str, html_raw: str) -> WebsiteLinkQAResult:
-    """
-    Produces up to 3 Content-QA-style rows (item/status/detail), inserted
-    right after the existing 'Website: ...' Content QA row:
-      1. Dealer Panel Website matches dealer name
-      2. CTA Button Link matches dealer name
-      3. CTA Button Link matches Dealer Panel Website
-    If dealer_name is empty, all three are skipped (returns no rows) —
-    there is nothing to validate against.
-    """
 def run_website_link_qa(
     dealer_name: str,
     panel_text: str,
@@ -244,23 +332,60 @@ def run_website_link_qa(
             "detail": f"CTA button href '{cta_href}' does not look like a valid website URL.",
         })
     else:
-        ok = _domain_matches_dealer(cta_domain, dealer_name)
+        ok, where = _dealer_name_in_url(cta_href, dealer_name)
+        if ok and where == "domain":
+            detail = (
+                f"CTA button link domain '{cta_domain}' correctly corresponds to "
+                f"dealer '{dealer_name}'."
+            )
+        elif ok:
+            detail = (
+                f"CTA button link correctly corresponds to dealer '{dealer_name}' — the "
+                f"dealer is named in the link itself ('{cta_href}') rather than in the "
+                f"domain '{cta_domain}', which is how a dealer's page on a shared BMW "
+                f"property is linked."
+            )
+        else:
+            detail = (
+                f"CTA button link '{cta_href}' does NOT correspond to dealer "
+                f"'{dealer_name}' — the dealer's name appears neither in the domain "
+                f"'{cta_domain}' nor anywhere else in the link."
+            )
         rows.append({
             "item": f"Website check (CTA Button): {cta_href}",
             "status": "Pass" if ok else "Fail",
-            "detail": (
-                f"CTA button link domain '{cta_domain}' "
-                f"{'correctly corresponds to' if ok else 'does NOT correspond to'} dealer '{dealer_name}'."
-            ),
+            "detail": detail,
         })
 
     # ---- Row 3: CTA Button Link vs Dealer Panel Website (cross-check) ----
     if panel_domain is not None and cta_domain is not None:
-        ok = panel_domain == cta_domain
-        detail = (
-            f"CTA button domain ('{cta_domain}') "
-            f"{'matches' if ok else 'does NOT match'} the Dealer Panel website domain ('{panel_domain}')."
-        )
+        same_domain, how = _domains_same_dealer(cta_domain, panel_domain)
+        # Two different domains still agree when BOTH demonstrably belong
+        # to this dealer: the panel points at the dealer's own site while
+        # the CTA points at that dealer's page on a shared BMW property.
+        cta_is_dealers = _dealer_name_in_url(cta_href, dealer_name)[0]
+        panel_is_dealers = _dealer_name_in_url(panel_website_raw, dealer_name)[0]
+        both_the_dealers = cta_is_dealers and panel_is_dealers
+
+        ok = same_domain or both_the_dealers
+        if same_domain:
+            detail = (
+                f"CTA button domain ('{cta_domain}') {how} the Dealer Panel website "
+                f"domain ('{panel_domain}')."
+            )
+        elif both_the_dealers:
+            detail = (
+                f"CTA button domain ('{cta_domain}') is a different domain from the Dealer "
+                f"Panel website ('{panel_domain}'), but both belong to dealer "
+                f"'{dealer_name}' — the panel links the dealer's own site and the CTA links "
+                f"that dealer's page on another BMW property."
+            )
+        else:
+            detail = (
+                f"CTA button domain ('{cta_domain}') does NOT match the Dealer Panel website "
+                f"domain ('{panel_domain}'), and the two do not both belong to dealer "
+                f"'{dealer_name}'."
+            )
         if dealer_mismatch and not ok:
             detail += (
                 f" This is expected: the Dealer Panel shown belongs to the SELECTED dealer "
