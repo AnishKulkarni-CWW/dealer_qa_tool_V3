@@ -2257,6 +2257,16 @@ if ext_view == "help":
                 band at the foot on the previous one. Both are read automatically;
                 <b>Banner layout</b> in Validation Options forces one if a banner is
                 read wrongly.</p>
+                <p class="dq-help-p">Every banner is read three ways — as supplied,
+                as white ink (for type over a pale sky) and as local ink (for type
+                over something brighter than itself) — and the best reading of each
+                LINE is kept. Both sides of this check are OCR, the Master's and this
+                email's, so when a difference is plainly the same word read badly —
+                <code>FECT</code> for <code>PERFECT</code>, <code>CET</code> for
+                <code>GET</code>, or a casing difference — it is shown as a
+                readability <b>warning</b> naming both spellings rather than a
+                failure. Model codes are never treated that way: <code>X5</code>
+                against <code>X7</code> is always a failure.</p>
 
                 <div class="dq-help-h">6 · Body QA</div>
                 <ul class="dq-help-ul">

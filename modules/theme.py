@@ -93,6 +93,18 @@ WARN_BG = "#FEF6E7"
 WARN_LINE = "#FBD9A1"
 WARN_SOLID = "#F79009"
 
+# The "app is busy" bar across the very top of the window. Deliberately NOT
+# the brand blue: the page is already mostly brand blue, and a progress bar
+# that blends into the chrome is a progress bar nobody notices. Amber reads
+# as "in flight" at a glance and holds its contrast against both the white
+# top bar and the pale canvas.
+BUSY = "#F59E0B"
+BUSY_HOT = "#EA580C"
+BUSY_TRACK = "#FCE3BE"
+BUSY_INK = "#7C2D12"
+BUSY_CHIP = "#FFF7ED"
+BUSY_LINE = "#FDBA74"
+
 BAD = "#B42318"
 BAD_BG = "#FDECEC"
 BAD_LINE = "#F7BFBB"
@@ -257,8 +269,9 @@ header[data-testid="stHeader"] [data-testid="stToolbar"] {{
 /* ---- the running indicator ----
    Streamlit's own "Running..." chip lives in the top-right toolbar, where
    it is easy to miss on a wide screen and scrolls out of reach on a long
-   report. It is replaced by a bar pinned to the very top of the viewport,
-   centred, that shows for exactly as long as the app is busy.
+   report. It is replaced by an amber bar pinned across the full width of
+   the very top of the viewport, with a centred "Working" chip beneath it,
+   that shows for exactly as long as the app is busy.
 
    There is no event to hook: the chip exists in the DOM only while a run
    is in flight, so `body:has(...)` IS the "is it running" test, and the
@@ -267,33 +280,39 @@ header[data-testid="stHeader"] [data-testid="stToolbar"] {{
 
 .dq-topload {{
     position:fixed; top:0; left:0; right:0; z-index:1000001;
-    display:flex; flex-direction:column; align-items:center; gap:.32rem;
-    padding-top:.5rem; pointer-events:none;
-    opacity:0; transform:translateY(-8px);
+    display:flex; flex-direction:column; align-items:center;
+    pointer-events:none;
+    opacity:0; transform:translateY(-10px);
     transition:opacity .18s ease, transform .18s ease;
 }}
 body:has([data-testid="stStatusWidget"]) .dq-topload {{
     opacity:1; transform:none;
 }}
+/* Edge to edge and flush with the very top of the window: this is the one
+   thing on the page that has to be seen without being looked for, so it
+   gets the full width of the screen rather than a centred sliver. */
 .dq-topload-track {{
-    width:min(440px, 56vw); height:4px; border-radius:999px;
-    background:{BRAND_TINT}; overflow:hidden;
-    box-shadow:0 1px 3px rgba(16,24,40,.12);
+    width:100%; height:6px;
+    background:{BUSY_TRACK}; overflow:hidden;
+    box-shadow:0 1px 10px -1px rgba(234,88,12,.55);
 }}
 .dq-topload-bar {{
-    height:100%; width:36%; border-radius:999px;
-    background:linear-gradient(90deg,{BRAND_TINT} 0%,{BRAND} 45%,{BRAND_DEEP} 65%,{BRAND_TINT} 100%);
-    animation:dq-topload-slide 1.05s ease-in-out infinite;
+    height:100%; width:30%;
+    background:linear-gradient(90deg,
+        rgba(245,158,11,0) 0%, {BUSY} 30%, {BUSY_HOT} 55%,
+        {BUSY} 78%, rgba(245,158,11,0) 100%);
+    animation:dq-topload-slide 1.15s ease-in-out infinite;
 }}
 @keyframes dq-topload-slide {{
-    0%   {{ transform:translateX(-115%); }}
-    100% {{ transform:translateX(395%); }}
+    0%   {{ transform:translateX(-120%); }}
+    100% {{ transform:translateX(450%); }}
 }}
 .dq-topload-text {{
+    margin-top:.38rem;
     font-size:.685rem; font-weight:800; letter-spacing:.1em; text-transform:uppercase;
-    color:{BRAND_DARK}; background:rgba(255,255,255,.94);
-    border:1px solid {BRAND_LINE}; border-radius:999px; padding:.14rem .6rem;
-    box-shadow:0 2px 8px -3px rgba(16,24,40,.25);
+    color:{BUSY_INK}; background:{BUSY_CHIP};
+    border:1px solid {BUSY_LINE}; border-radius:999px; padding:.16rem .68rem;
+    box-shadow:0 3px 10px -3px rgba(234,88,12,.5);
 }}
 /* The element is `fixed`, so it contributes no height of its own; this
    stops its (empty) Streamlit container from adding a gap to the page. */
