@@ -17,7 +17,7 @@ Three views live on the navigation rail:
 | View | What it is |
 | --- | --- |
 | **Home** | The whole workflow. |
-| **Settings** | Result table density, whether the progress rail is shown, a session reset, the OCR engine this install found, and the read-only QA thresholds from `modules/config.py`. |
+| **Settings** | Result table density, whether the progress rail is shown, a session reset, and the read-only QA thresholds from `modules/config.py`. |
 | **Help** | **What gets QA'd** — every check the tool runs and what makes each one pass or fail — then how to run a pass, how Master priority resolves, and the common causes when something looks wrong. |
 
 Below the menu the rail carries one switch, **Show the welcome panel**, so
@@ -135,11 +135,7 @@ streamlit run app.py
     wrongly. Two things make this work: the banner's lines are grouped into
     vertical blocks and the fields are read from the block carrying the
     message (so a large model badge can never be returned as the headline),
-    and a banner whose white display type sits over a pale sky — which
-    Tesseract returns *nothing* at all for — is re-read as a white-ink
-    rendition. The artwork as supplied always leads; the rendition is only
-    used when it is decisively the better read, so every page of a real
-    bulletin deck still reads exactly as it did.
+    and the banner is read in three renditions rather than one (see 14e).
 
 14c. **Campaign zips, any depth** — a zip may hold one email, or a folder
     per model nested inside a wrapper directory or two. The tool looks for
@@ -155,6 +151,38 @@ streamlit run app.py
     creative beside each `index.html` feeds the same index; an uploaded
     image wins where both name the same model, and a per-adapt Master
     always wins over both.
+
+14e. **Three renditions, best reading per line** — the current guideline
+    sets white display type straight over the photograph, and no single
+    rendering of those pixels reads a whole banner. The artwork *as
+    supplied* is read first; a **white-ink** rendition (near-white pixels
+    become black ink on white paper) recovers type over a pale sky, which
+    the original returns nothing at all for; and a **local-ink** rendition
+    (a morphological top-hat, then a local threshold) recovers type set
+    over something *brighter* than itself, such as the sunlit flank of a
+    car. The renditions fail in different *places* on the same banner, so
+    the tool takes the best reading of **each line** — whole, from one
+    rendition, never stitched together out of two. One rendition still
+    decides what the lines are, so nothing is invented, duplicated or
+    lost; the others may only say what a line it already found says, and
+    have to beat it by a margin to do so. Measured on the September
+    festive creatives this turned `FECT MATCH.` into `PERFECT MATCH.`,
+    `GET THEB` into `GET THE BMW X5` and `WITH DEPRECIATION BEN IE` into
+    `WITH DEPRECIATION BENEFITS.`, while every page of a real bulletin
+    deck still reads as it did. Each banner's OCR is cached against its
+    own pixels, so reading it three ways costs less than reading it once
+    used to.
+
+14f. **An OCR misread is not a copy error** — both sides of Banner Text QA
+    are OCR: the expected copy off the Master, the found copy off the
+    dealer's email. When a missing word is plainly the same word read
+    badly — a fragment (`FECT` of `PERFECT`), one confused character
+    (`CET` for `GET`), one character inserted or dropped, or a casing
+    difference on display type — it is reported as a readability warning
+    naming both spellings instead of failing the field. The rules are
+    narrow by design: short tokens stay out of it entirely, so `X5` and
+    `X7`, or `2G` and `2GC`, are always compared character for character
+    and always fail. Anything left unexplained fails exactly as before.
 
 15. **Tabbed results** — every QA section renders as KPI tiles (total /
     passed / failed / warnings) above a tabbed record table: Issues /

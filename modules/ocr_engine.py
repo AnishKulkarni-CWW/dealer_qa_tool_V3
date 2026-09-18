@@ -91,7 +91,9 @@ the geometric bands whenever content assignment finds nothing for a field,
 so behaviour is never worse than before.
 """
 
+import hashlib
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Iterable, List, Optional, Sequence, Tuple, Union
@@ -192,13 +194,110 @@ WHITE_INK_THRESHOLD = 200
 # with more characters lead; fragmentation inflates a character count, so
 # the worse read won and three of the ten pages came back mangled.
 #
-# So: the artwork as supplied always leads, and the white-ink rendition
-# replaces it only when it is decisively better — which is exactly the
-# case it exists for, where the original recovers nothing at all. Score is
-# characters weighted by confidence, and the margin keeps a rendition that
-# is merely equal from taking over.
-MIN_OCR_CHARS_BEFORE_RETRY = 10
-RENDITION_SWITCH_MARGIN = 1.5
+# So: the artwork as supplied always leads, and another rendition replaces
+# it only where it is decisively better — see the per-line merge below,
+# which is where "decisively" is now decided, one line at a time instead of
+# one banner at a time.
+
+# --------------------------------------------------------------------------
+# Display type over a BRIGHT, uneven background (see `_local_ink_rendition`)
+# --------------------------------------------------------------------------
+# WHITE_INK_THRESHOLD works off a single global grey level, which is only
+# the right instrument while the background is darker than the type
+# everywhere on the banner. On the X5 festive creative the subheadline runs
+# across the sunlit flank of the car, and those pixels are BRIGHTER than
+# the type — so a global threshold turns the car into ink and swallows the
+# words sitting inside it ("GET THE BMW X5" came back as "GET THEB").
+#
+# A morphological top-hat removes whatever is broader than its structuring
+# element and keeps whatever is thinner, which is precisely the difference
+# between a car's flank and a letter stroke. What is left is strokes on a
+# flat floor rather than type on a photograph, which is something a
+# threshold can actually be set for (see LOCAL_INK_WINDOW_PX).
+#
+# The kernel has to be WIDER than the thickest stroke on the banner (a 42px
+# headline is set in roughly 5px strokes) and narrower than the background
+# features worth removing. 25px measured best across the sample creatives;
+# at 9px the headline's own strokes start being eaten.
+LOCAL_INK_KERNEL_PX = 25
+
+# What is left has to be thresholded LOCALLY too, not by one level for the
+# whole banner. A global level is set by whatever responds most strongly to
+# the filter, which is the 42px headline — and the threshold that suits a
+# 5px stroke erases a 2px one. Measured on the X5 master: with a global
+# (Otsu) level the subheadline came back as "GET THE BM'", and on a crop
+# containing ONLY the subheadline the very same filter read "GET THE BMW
+# X5" perfectly, because Otsu then had only the subheadline to look at.
+#
+# So the ink is whatever stands this many grey levels above its own
+# neighbourhood, over a window a few times the height of the smallest type
+# on a banner. The bias is what keeps flat background flat: at 0 every
+# patch of empty sky finds "ink" in its own sensor noise.
+LOCAL_INK_WINDOW_PX = 31
+LOCAL_INK_BIAS = 8
+
+# --------------------------------------------------------------------------
+# Picking the best reading of each LINE, not of the whole banner
+# --------------------------------------------------------------------------
+# Choosing one rendition for the entire banner cannot be right, because the
+# renditions fail in different PLACES on the same artwork. Measured on the
+# September festive creative, master and dealer email side by side:
+#
+#   as supplied   BRING HOME YOUR / FECT MATCH.          <- loses "PER"
+#                 THIS FESTIVE SEASON, GET THE BMW X7    <- correct
+#   white-ink     BRING HOME YOUR / PERFECT MATCH.       <- correct
+#                 THIS FEST ASON, GET THE BMW X7         <- loses "IVE SE"
+#
+# Whichever one is picked for the whole banner, a field comes back wrong —
+# and the master and the dealer's email do not fail in the same place, so
+# the QA reported words missing that are plainly present on both. Choosing
+# per LINE gets every field right out of the same passes.
+#
+# An earlier attempt merged the renditions at the WORD level and let the
+# one with more characters lead. Fragmentation inflates a character count,
+# so the worse read won and three of ten bulletin pages came back mangled.
+# This is the opposite of that: a line is only ever taken WHOLE, from one
+# rendition, so no line is ever stitched together out of two readings.
+#
+# ONE rendition still decides WHAT THE LINES ARE — the one that read the
+# banner best overall. The others may only say what a line it already found
+# SAYS. That asymmetry is load-bearing in both directions:
+#
+#   * nothing is added, so a rendition that hallucinates a scrap of the
+#     photograph, or that reads a model badge the others cannot, cannot
+#     change the line count — and the line count is what the block-gap and
+#     small-type-upscale thresholds are measured against, so an extra line
+#     silently re-bands the whole banner;
+#   * nothing is removed or duplicated, so a rendition that measures one
+#     line's boxes at twice their real height (the artwork as supplied does
+#     this on soft-focus photography) cannot swallow the line beneath it.
+#
+# A challenger has to beat the line it is challenging by this margin, which
+# keeps a merely-equal reading from changing a correct one: on a real
+# bulletin page the model badge scores 260 as "THE7" and 264 as "THE?".
+RENDITION_LINE_SWITCH_MARGIN = 1.12
+
+# Two readings are of the SAME line when their core bands overlap by more
+# than this fraction of the shorter band.
+RENDITION_LINE_OVERLAP_RATIO = 0.5
+
+# How a line's reading is scored for that comparison. Each word counts its
+# alphanumeric characters times its confidence — so a fuller read of the
+# same line wins, which is the whole point — and then two penalties for the
+# shapes OCR noise actually takes on this artwork.
+JUNK_CHARACTER_PENALTY = 0.5   # a character that is neither alphanumeric nor
+                               # ordinary punctuation: "DE?!", "‘OE?", "BM'"
+MIXED_CASE_PENALTY = 0.55      # lower case inside a line otherwise set in
+                               # capitals: "BMw", "iaTiON", "BENEFIfg", "writ"
+CAPS_LINE_RATIO = 0.7          # ...which is what makes a line "capitals"
+_PLAIN_PUNCTUATION = set(" .,'‘’\"“”-–—&%:;!?()/+")
+
+# ...and the tighter set used when deciding whether a word at the EDGE of a
+# line is a scrap of artwork. Brackets and slashes are dropped from it: real
+# copy does contain them, but never in a short, unsure word at one end of a
+# line, whereas a fragment read out of a photograph regularly does ("ey)",
+# "(we"). The confidence guard is what protects genuine punctuated copy.
+_WORD_EDGE_PUNCTUATION = _PLAIN_PUNCTUATION - set("()/+")
 
 # --------------------------------------------------------------------------
 # Banner layout (see `group_lines_into_blocks` / `detect_banner_layout`)
@@ -998,7 +1097,19 @@ def _is_probable_debris_line(words: List[dict], text: str) -> bool:
             return False
     if longest > DEBRIS_LINE_MAX_CHARS:
         return False
-    return best_conf < DEBRIS_LINE_MAX_CONFIDENCE
+    if best_conf < DEBRIS_LINE_MAX_CONFIDENCE:
+        return True
+    # A whole "line" of ONE character is a scrap whatever Tesseract's
+    # confidence in it, because banner copy is not one character long. The
+    # measured case: a lone "x" read at confidence 55 out of the paving in
+    # a photograph, three inches to the right of a headline, which font-size
+    # banding then handed to the Headline field as its first word. Real
+    # single characters ("THE 7") arrive on a line with other words, and a
+    # genuinely isolated one is still kept by the left-alignment test in
+    # `_drop_debris_lines`.
+    alphanumeric = sum(
+        len(re.sub(r"[^A-Za-z0-9]", "", w["text"] or "")) for w in words)
+    return alphanumeric <= 1
 
 
 def _tesseract_data(image: Image.Image, config: str = "") -> dict:
@@ -1078,14 +1189,46 @@ def _upscale_factor_for(boxes: List[dict]) -> int:
     return max(2, min(OCR_MAX_UPSCALE, factor))
 
 
+def _local_ink_rendition(image: Image.Image) -> Optional[Image.Image]:
+    """The banner's type lifted off a bright, uneven background.
+
+    See LOCAL_INK_KERNEL_PX for what the top-hat is doing and why a single
+    global grey level cannot do it. Returns None when OpenCV is not
+    installed or the filter fails, in which case the banner is simply read
+    from the other renditions — this is an extra chance at a hard banner,
+    never a requirement.
+    """
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return None
+    try:
+        grey = np.array(image.convert("L"))
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (LOCAL_INK_KERNEL_PX, LOCAL_INK_KERNEL_PX))
+        tophat = cv2.morphologyEx(grey, cv2.MORPH_TOPHAT, kernel)
+        binary = cv2.adaptiveThreshold(
+            tophat, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
+            LOCAL_INK_WINDOW_PX, -LOCAL_INK_BIAS)
+        return Image.fromarray(255 - binary).convert("RGB")
+    except Exception:
+        return None
+
+
 def _render_variants(image: Image.Image) -> List[Tuple[str, Image.Image]]:
     """The renditions of a banner that Tesseract is asked to read.
 
-    "original" is the artwork as supplied. "white-ink" re-renders it so
-    that near-white pixels become black ink on white paper, which is the
-    only way the current guideline's white-on-sky headline is readable at
-    all (see WHITE_INK_THRESHOLD). Both keep the original dimensions, so
-    every box either returns is already in original-image coordinates.
+    "original" is the artwork as supplied, and comes first because it wins
+    ties (see `_merge_rendition_lines`). "white-ink" re-renders it so that
+    near-white pixels become black ink on white paper, which is the only
+    way the current guideline's white-on-sky headline is readable at all
+    (see WHITE_INK_THRESHOLD). "local-ink" keeps only what is too THIN to
+    be background, for type set over something brighter than itself (see
+    LOCAL_INK_KERNEL_PX).
+
+    All three keep the original dimensions, so every box any of them
+    returns is already in original-image coordinates.
     """
     variants: List[Tuple[str, Image.Image]] = [("original", image)]
     try:
@@ -1096,61 +1239,247 @@ def _render_variants(image: Image.Image) -> List[Tuple[str, Image.Image]]:
         variants.append(("white-ink", white_ink))
     except Exception:
         pass
+    local_ink = _local_ink_rendition(image)
+    if local_ink is not None:
+        variants.append(("local-ink", local_ink))
     return variants
 
 
-def _boxes_strength(boxes: List[dict]) -> Tuple[int, float]:
-    """How much real text a rendition recovered: (alphanumeric characters,
-    mean confidence). Used only to decide which rendition leads the merge."""
-    chars = 0
-    confs: List[float] = []
-    for w in boxes:
-        text = re.sub(r"[^A-Za-z0-9]", "", w.get("text") or "")
-        if not text:
-            continue
-        chars += len(text)
+def _line_core_band(words: List[dict]) -> Tuple[float, float]:
+    """The vertical band a line's TYPE occupies, as (top, bottom).
+
+    Deliberately not the line's raw box extent. One inflated box — an
+    apostrophe, a descender, a smear of anti-aliasing — stretches that
+    extent far past the type: on the X7 master the white-ink rendition
+    returns "PERFECT MATCH." spanning y=85..148, which overlaps the
+    subheadline 50px below it and would make the two look like readings of
+    the same line. The median word top with the robust `_core_line_height`
+    on top of it stays on the type itself.
+    """
+    measured = _measurement_words(words)
+    if not measured:
+        return 0.0, 0.0
+    top = _median([float(w["top"]) for w in measured])
+    return top, top + _core_line_height(measured)
+
+
+def _bands_overlap(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    """How well two core bands agree that they are the same line of type.
+
+    Returns the overlap as a fraction of the SHORTER band, or 0.0 when the
+    two do not overlap enough to be readings of one line at all.
+    """
+    overlap = min(a[1], b[1]) - max(a[0], b[0])
+    if overlap <= 0:
+        return 0.0
+    shortest = min(a[1] - a[0], b[1] - b[0])
+    if shortest <= 0:
+        return 0.0
+    agreement = overlap / shortest
+    return agreement if agreement >= RENDITION_LINE_OVERLAP_RATIO else 0.0
+
+
+def _line_is_capitals(words: List[dict]) -> bool:
+    """Whether this line is set in capitals, judged only on the words the
+    reading is actually sure of.
+
+    Judging on every word lets one hallucinated scrap decide. Measured on a
+    real bulletin page: the badge line "THE i7" is capitals, so the lower
+    case in "i7" is penalised as the OCR artefact it usually is — but a
+    second rendition read the same line as "THE i7 (we)" at confidence 0
+    for the scrap, which dropped the line to 50% capitals, exempted "i7"
+    from the penalty, and let the reading WITH the scrap in it win.
+    """
+    trusted = _measurement_words(words) or words
+    letters = [ch for w in trusted for ch in (w.get("text") or "") if ch.isalpha()]
+    if not letters:
+        return False
+    return sum(1 for ch in letters if ch.isupper()) / len(letters) >= CAPS_LINE_RATIO
+
+
+def _word_reading_score(word: dict, line_is_capitals: bool) -> float:
+    """How much real text one word of a reading is worth.
+
+    Characters times confidence, less the two penalties described at
+    JUNK_CHARACTER_PENALTY / MIXED_CASE_PENALTY. Both penalise the shape of
+    a misread rather than its content, so a genuinely wrong word on the
+    artwork is scored exactly like a right one — the merge chooses between
+    READINGS of a line, and must never prefer a line for what it says.
+    """
+    text = word.get("text") or ""
+    letters = re.sub(r"[^A-Za-z0-9]", "", text)
+    if not letters:
+        return 0.0
+    try:
+        confidence = max(float(word.get("conf")), 0.0)
+    except (TypeError, ValueError):
+        confidence = 100.0
+    penalty = 1.0
+    if any((not ch.isalnum()) and ch not in _PLAIN_PUNCTUATION for ch in text):
+        penalty *= JUNK_CHARACTER_PENALTY
+    if line_is_capitals and any(ch.islower() for ch in text if ch.isalpha()):
+        penalty *= MIXED_CASE_PENALTY
+    return len(letters) * confidence * penalty
+
+
+def _line_reading_score(words: List[dict]) -> float:
+    capitals = _line_is_capitals(words)
+    return sum(_word_reading_score(w, capitals) for w in words)
+
+
+def _strip_edge_debris_words(words: List[dict]) -> List[dict]:
+    """Removes a hallucinated scrap glued to the START or END of a line.
+
+    A rendition that reads a line better than the others can still pick up
+    a fragment of the artwork at one end of it and carry that fragment into
+    the merged reading — measured on a real bulletin page, "ey) LET'S SKIP
+    TO THE GOOD PART.", where "ey)" is a piece of the photograph.
+
+    Deliberately narrow, and deliberately only at the ends: a word is
+    dropped only when it is short AND unsure AND contains a character that
+    does not belong in banner copy at all. Real short copy clears at least
+    one of the three — the "50%*" in a real subheadline is punctuated but
+    confident, and "THE" is short and clean. Nothing is ever removed from
+    the middle of a line, where a scrap cannot be, and a line is never
+    emptied.
+    """
+    def is_scrap(word: dict) -> bool:
+        text = word.get("text") or ""
+        if len(re.sub(r"[^A-Za-z0-9]", "", text)) > DEBRIS_LINE_MAX_CHARS:
+            return False
         try:
-            confs.append(float(w.get("conf")))
+            if float(word.get("conf")) >= DEBRIS_LINE_MAX_CONFIDENCE:
+                return False
         except (TypeError, ValueError):
-            confs.append(100.0)
-    return chars, (sum(confs) / len(confs) if confs else 0.0)
+            return False
+        return any((not ch.isalnum()) and ch not in _WORD_EDGE_PUNCTUATION for ch in text)
+
+    kept = list(words)
+    while len(kept) > 1 and is_scrap(kept[0]):
+        kept.pop(0)
+    while len(kept) > 1 and is_scrap(kept[-1]):
+        kept.pop()
+    return kept
+
+
+def _read_lines_of(boxes: List[dict]) -> List[dict]:
+    """One rendition's reading, as a list of `{band, score, words}` lines."""
+    reading: List[dict] = []
+    for words in _group_boxes_into_lines(boxes):
+        band = _line_core_band(words)
+        if band[1] <= band[0]:
+            continue
+        reading.append({
+            "band": band,
+            "score": _line_reading_score(words),
+            "words": words,
+        })
+    return reading
+
+
+def _corroborated_total(rendition: dict, every: List[dict]) -> float:
+    """How much of a rendition's reading a DIFFERENT rendition also found."""
+    elsewhere = [
+        line for other in every if other["index"] != rendition["index"]
+        for line in other["lines"]
+    ]
+    return sum(
+        line["score"] for line in rendition["lines"]
+        if any(_bands_overlap(line["band"], seen["band"]) for seen in elsewhere)
+    )
+
+
+def _merge_rendition_lines(readings: List[Tuple[str, List[dict]]]) -> List[dict]:
+    """The best reading of every line, each taken WHOLE from one rendition.
+
+    `readings` is `[(label, word_boxes), ...]` with the artwork as supplied
+    first. The rendition that read the most CORROBORATED text becomes the
+    SKELETON: its lines, and only its lines, are the banner's lines. Every
+    other rendition then challenges each skeleton line it overlaps, and
+    wins that line's text — never its place on the banner — by beating it by
+    RENDITION_LINE_SWITCH_MARGIN. See the block above the margin for why
+    the line set has to come from a single rendition.
+
+    Ties go to the artwork as supplied, which is first in the list.
+    """
+    scored = [
+        {"index": index, "lines": _read_lines_of(boxes)}
+        for index, (_label, boxes) in enumerate(readings)
+    ]
+    # A rendition is scored only on the lines ANOTHER rendition can also
+    # see. Something only one rendition finds is either a scrap of the
+    # photograph or a line the others could not read, and neither is
+    # evidence that this rendition read the BANNER better. Measured on the
+    # 2GC master: white-ink read the subheadline as "GET THE BMW 2G" where
+    # both other renditions read "2GC", and won the skeleton anyway on the
+    # strength of two scraps ("até", "cr") that nothing else saw.
+    for rendition in scored:
+        rendition["total"] = _corroborated_total(rendition, scored)
+    if not any(rendition["total"] for rendition in scored):
+        # Nothing corroborates anything — one rendition read the banner and
+        # the rest came back empty. Score them as they are, so a banner only
+        # one rendition can read is still read.
+        for rendition in scored:
+            rendition["total"] = sum(line["score"] for line in rendition["lines"])
+
+    skeleton = max(scored, key=lambda r: (r["total"], -r["index"]))
+    slots = [dict(line) for line in skeleton["lines"]]
+    if not slots:
+        return []
+
+    for rendition in scored:
+        if rendition["index"] == skeleton["index"]:
+            continue
+        for line in rendition["lines"]:
+            target, agreement = None, 0.0
+            for position, slot in enumerate(slots):
+                overlap = _bands_overlap(slot["band"], line["band"])
+                if overlap > agreement:
+                    target, agreement = position, overlap
+            if target is None:
+                continue
+            if line["score"] > slots[target]["score"] * RENDITION_LINE_SWITCH_MARGIN:
+                # The slot keeps the skeleton's band, so that every later
+                # challenger is matched against the same stable geometry.
+                slots[target]["score"] = line["score"]
+                slots[target]["words"] = line["words"]
+
+    return [w for slot in slots for w in _strip_edge_debris_words(slot["words"])]
 
 
 def _boxes_for_renditions(image: Image.Image) -> List[dict]:
-    """Reads `image` as supplied, and falls back to the white-ink rendition
-    only when that is decisively the better read.
-
-    See MIN_OCR_CHARS_BEFORE_RETRY / RENDITION_SWITCH_MARGIN for the
-    measurements behind "decisively": the artwork as supplied is right
-    almost always, and the one case it is not — white display type over a
-    pale sky — it returns nothing at all rather than something poor.
-    """
-    variants = _render_variants(image)
-    if not variants:
-        return []
-
-    def read(label: str, img: Image.Image) -> List[dict]:
+    """Reads `image` in every rendition and keeps the best reading of each
+    line — see `_merge_rendition_lines` and the block above it."""
+    readings: List[Tuple[str, List[dict]]] = []
+    for label, rendered in _render_variants(image):
         try:
-            return _word_boxes(_tesseract_data(img), source=label)
+            readings.append((label, _word_boxes(_tesseract_data(rendered), source=label)))
         except Exception:
-            return []
+            readings.append((label, []))
+    return _merge_rendition_lines(readings)
 
-    label0, img0 = variants[0]
-    primary = read(label0, img0)
-    p_chars, p_conf = _boxes_strength(primary)
-    p_score = p_chars * p_conf
 
-    for label, img in variants[1:]:
-        alt = read(label, img)
-        a_chars, a_conf = _boxes_strength(alt)
-        a_score = a_chars * a_conf
-        decisive = (
-            (p_chars < MIN_OCR_CHARS_BEFORE_RETRY and a_chars > p_chars)
-            or a_score > p_score * RENDITION_SWITCH_MARGIN
-        )
-        if decisive:
-            primary, p_chars, p_conf, p_score = alt, a_chars, a_conf, a_score
-    return primary
+# How many banners' word boxes are remembered. A banner is OCR'd twice by
+# the QA — once for its lines and once for the flat blob — and a run of
+# nine adapts reads eighteen banners, so anything above a couple of dozen
+# is just memory. Keyed on the pixels, so two different banners never
+# collide and a re-uploaded file is recognised as the same artwork.
+_WORD_BOX_CACHE_SIZE = 24
+_WORD_BOX_CACHE: "OrderedDict[str, Tuple[List[dict], int]]" = OrderedDict()
+
+
+def _image_fingerprint(image: Image.Image) -> Optional[str]:
+    try:
+        digest = hashlib.blake2b(image.tobytes(), digest_size=16)
+        digest.update(f"{image.mode}:{image.size}".encode("ascii"))
+        return digest.hexdigest()
+    except Exception:
+        return None
+
+
+def _copy_boxes(boxes: List[dict]) -> List[dict]:
+    """Callers get their own dicts, so nothing they do can reach the cache."""
+    return [dict(box) for box in boxes]
 
 
 def _tesseract_word_boxes(image: Image.Image) -> Tuple[List[dict], int]:
@@ -1158,9 +1487,9 @@ def _tesseract_word_boxes(image: Image.Image) -> Tuple[List[dict], int]:
     OCRs `image` and returns `(word_boxes, scale_used)`.
 
     Every pass goes through `_boxes_for_renditions`, which reads the
-    artwork as supplied and falls back to a white-ink rendition when that
-    returns nothing — without which the current guideline's white-on-sky
-    headline produces no boxes at all.
+    artwork in each rendition and keeps the best reading of each LINE —
+    without which the current guideline's white-on-sky headline produces
+    either no boxes at all or half a headline, depending on the banner.
 
     When the first pass shows the type is too small to read reliably, the
     image is enlarged and OCR'd again — and every coordinate is divided
@@ -1172,7 +1501,29 @@ def _tesseract_word_boxes(image: Image.Image) -> Tuple[List[dict], int]:
     different sets of filters and could return contradictory text for the
     same banner (the flat blob showed a word that the per-line output had
     silently dropped). One source of truth removes that whole class of bug.
+
+    ...and because both of them are called for every banner, the result is
+    remembered against the banner's own pixels (see _WORD_BOX_CACHE_SIZE),
+    which halves the OCR a run does. The cache hands out copies, so a
+    caller can do as it likes with what it gets back.
     """
+    fingerprint = _image_fingerprint(image)
+    if fingerprint is not None and fingerprint in _WORD_BOX_CACHE:
+        cached_boxes, cached_scale = _WORD_BOX_CACHE[fingerprint]
+        _WORD_BOX_CACHE.move_to_end(fingerprint)
+        return _copy_boxes(cached_boxes), cached_scale
+
+    result = _read_word_boxes(image)
+
+    if fingerprint is not None:
+        _WORD_BOX_CACHE[fingerprint] = (_copy_boxes(result[0]), result[1])
+        while len(_WORD_BOX_CACHE) > _WORD_BOX_CACHE_SIZE:
+            _WORD_BOX_CACHE.popitem(last=False)
+    return result
+
+
+def _read_word_boxes(image: Image.Image) -> Tuple[List[dict], int]:
+    """`_tesseract_word_boxes` without the cache in front of it."""
     boxes = _boxes_for_renditions(image)
     factor = _upscale_factor_for(boxes)
     if factor <= 1:

@@ -86,6 +86,45 @@ copy is never absorbed into a field to make it pass; it stays unmatched
 and is reported in the notes.
 
 --------------------------------------------------------------------------
+Telling an OCR misread apart from a copy error
+--------------------------------------------------------------------------
+BOTH sides of this comparison are OCR: the expected copy is read off the
+Master creative and the found copy off the dealer's email. When the two
+disagree it is therefore one of two completely different things — a real
+difference between the artworks, which is what this check exists to catch,
+or the same words read differently twice, which is not a defect at all and
+must not be reported as one.
+
+Measured on a real September festive adapt:
+
+    expected   BRING HOME YOUR PERFECT MATCH.
+    found      BRING HOME YOUR FECT MATCH.
+    reported   Fail — Missing word(s): PERFECT
+
+The banner was correct; the Master had been read badly. So a missing word
+is now PAIRED with an unexpected one when the second is plainly a damaged
+reading of the first. The pair is reported as an OCR-readability warning
+that names both spellings, and a field whose every difference is explained
+this way warns instead of failing.
+
+The pairing rules are deliberately narrow. Two words pair only when they
+are the same word read twice:
+
+  * a FRAGMENT — one is a prefix or a suffix of the other ("FECT" of
+    "PERFECT", "MAT" of "MATCH", "BEN" of "BENEFITS")
+  * ONE character different, and those two characters are a pair OCR
+    genuinely confuses ("CET" for "GET", "8ENEFITS" for "BENEFITS")
+  * ONE character inserted or dropped, on a word long enough that this
+    cannot be a different word ("BENEFTS" for "BENEFITS")
+  * the same letters in different CASE ("BMw" for "BMW"), which on display
+    type is an OCR artefact far more often than it is a real defect
+
+...and the length floors keep the short tokens this QA exists to police out
+of it entirely. "X5" and "X7" never pair, and neither do "2G" and "2GC": a
+model code is exactly what a reviewer needs to hear about, so it is always
+compared character for character and always fails.
+
+--------------------------------------------------------------------------
 `known_dealer_names` — the Master may carry a DIFFERENT dealer
 --------------------------------------------------------------------------
 The expected Headline/Subheadline are OCR'd from the Master creative, and
@@ -103,7 +142,7 @@ banner copy is never touched.
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from . import ocr_engine as _ocr_engine
 from .config import DEFAULT_CONFIG
@@ -161,6 +200,120 @@ def diff_words(expected: str, found: str, match_case: bool = False) -> WordDiff:
     return WordDiff(missing=missing, extra=extra)
 
 
+# --------------------------------------------------------------------------
+# OCR slips (see "Telling an OCR misread apart from a copy error" above)
+# --------------------------------------------------------------------------
+# A fragment has to carry this many characters, of a word at least this
+# long: below that a "fragment" is just a short word that happens to start
+# the same way.
+OCR_SLIP_MIN_FRAGMENT = 3
+OCR_SLIP_MIN_WHOLE = 5
+
+# One-character differences are only ever a slip on a word this long. Three
+# keeps "CET"/"GET" — measured, real — while leaving every two-character
+# model code ("X5" against "X7") to be compared character for character.
+OCR_SLIP_MIN_SUBSTITUTION = 3
+
+# An inserted or dropped character is a weaker signal than a confused one,
+# so it needs a longer word behind it.
+OCR_SLIP_MIN_EDIT = 5
+
+# Character pairs OCR actually confuses on this artwork. Anything not on
+# this list is a different letter, and a different letter is a copy error.
+_OCR_CONFUSIONS = {
+    frozenset("0O"), frozenset("0D"), frozenset("0Q"), frozenset("OQ"),
+    frozenset("OD"), frozenset("CG"), frozenset("CO"), frozenset("EF"),
+    frozenset("1I"), frozenset("1L"), frozenset("IL"), frozenset("IJ"),
+    frozenset("2Z"), frozenset("5S"), frozenset("6G"), frozenset("8B"),
+    frozenset("9G"), frozenset("9Q"), frozenset("UV"), frozenset("VY"),
+    frozenset("TI"), frozenset("RP"), frozenset("MN"),
+}
+
+
+def _is_fragment(shorter: str, longer: str) -> bool:
+    """True when `shorter` is one end of `longer` — how OCR loses a word."""
+    if len(shorter) < OCR_SLIP_MIN_FRAGMENT or len(longer) < OCR_SLIP_MIN_WHOLE:
+        return False
+    if len(shorter) >= len(longer):
+        return False
+    return longer.startswith(shorter) or longer.endswith(shorter)
+
+
+def _one_substitution_apart(a: str, b: str) -> bool:
+    """True when a and b differ in exactly one character, and that pair is
+    one OCR is known to confuse."""
+    if len(a) != len(b) or len(a) < OCR_SLIP_MIN_SUBSTITUTION:
+        return False
+    swapped = [(x, y) for x, y in zip(a, b) if x != y]
+    if len(swapped) != 1:
+        return False
+    x, y = swapped[0]
+    return frozenset((x.upper(), y.upper())) in _OCR_CONFUSIONS
+
+
+def _one_edit_apart(a: str, b: str) -> bool:
+    """True when one character was inserted into, or dropped from, a word
+    long enough that this cannot make it a different word."""
+    longer, shorter = (a, b) if len(a) > len(b) else (b, a)
+    if len(longer) - len(shorter) != 1 or len(longer) < OCR_SLIP_MIN_EDIT:
+        return False
+    for cut in range(len(longer)):
+        if longer[:cut] + longer[cut + 1:] == shorter:
+            return True
+    return False
+
+
+def _looks_like_ocr_slip(expected_word: str, found_word: str) -> bool:
+    """Whether `found_word` is the same word as `expected_word`, read badly."""
+    if not expected_word or not found_word:
+        return False
+    if expected_word == found_word:
+        return True
+    if expected_word.upper() == found_word.upper():
+        return True                       # casing only — see the module docstring
+    upper_expected, upper_found = expected_word.upper(), found_word.upper()
+    if _is_fragment(upper_found, upper_expected) or _is_fragment(upper_expected, upper_found):
+        return True
+    if _one_substitution_apart(upper_expected, upper_found):
+        return True
+    return _one_edit_apart(upper_expected, upper_found)
+
+
+def separate_ocr_slips(diff: WordDiff) -> Tuple[WordDiff, List[Tuple[str, str]]]:
+    """Splits a word diff into real differences and OCR slips.
+
+    Returns `(remaining, slips)` where `slips` is a list of
+    `(expected_word, what_was_read_instead)`. Each unexpected word can
+    explain at most one missing word, so two genuinely absent words can
+    never be explained away by one misread.
+    """
+    spare = list(diff.extra)
+    remaining_missing: List[str] = []
+    slips: List[Tuple[str, str]] = []
+    for word in diff.missing:
+        partner = next((e for e in spare if _looks_like_ocr_slip(word, e)), None)
+        if partner is None:
+            remaining_missing.append(word)
+            continue
+        spare.remove(partner)
+        slips.append((word, partner))
+    return WordDiff(missing=remaining_missing, extra=spare), slips
+
+
+def describe_ocr_slips(slips: List[Tuple[str, str]]) -> str:
+    """The sentence the QA row shows for a set of OCR slips."""
+    if not slips:
+        return ""
+    pairs = ", ".join(f"'{found}' for '{expected}'" for expected, found in slips[:6])
+    more = "" if len(slips) <= 6 else f" (and {len(slips) - 6} more)"
+    return (
+        f"Hard to read: {pairs}{more}. Both sides of this check are OCR — the "
+        f"Master's artwork and this email's — so a difference shaped like this is "
+        f"far more often one word read two ways than two different words. Compare "
+        f"the two banners by eye."
+    )
+
+
 def _squash(text: str, match_case: bool = False) -> str:
     """Letters and digits only, all spacing removed."""
     t = text if match_case else text.lower()
@@ -192,14 +345,25 @@ def _field_status(expected: str, found: str, config, match_case: bool = False,
     exp_tokens = _tokenize(expected, match_case=match_case)
     if not exp_tokens:
         return WARN, "Expected value has no comparable words."
+
+    # A word that is plainly the same word read badly is not a copy defect
+    # — see "Telling an OCR misread apart from a copy error" at the top of
+    # this module. It is still reported, by name and in both spellings; it
+    # just cannot fail the field on its own.
+    wd, slips = separate_ocr_slips(wd)
+
     matched_ratio = 1 - (len(wd.missing) / len(exp_tokens))
     if matched_ratio >= config.ocr_token_match_min_ratio and not wd.missing:
+        if slips:
+            return WARN, describe_ocr_slips(slips)
         return PASS, "All expected words found in banner OCR text."
     parts = []
     if wd.missing:
         parts.append(f"Missing word(s): {', '.join(wd.missing)}")
     if wd.extra:
         parts.append(f"Unexpected/extra word(s) nearby: {', '.join(wd.extra[:10])}")
+    if slips:
+        parts.append(describe_ocr_slips(slips))
     status = FAIL if matched_ratio < config.ocr_token_match_min_ratio else WARN
     return status, "; ".join(parts) if parts else "Partial match."
 
