@@ -81,6 +81,32 @@ class BundledModel:
         return io.BytesIO(self.zip_bytes)
 
 
+def uniquify_names(jobs: List[dict], key: str = "name") -> List[dict]:
+    """Makes sure no two adapts share a name. Edits `jobs` in place.
+
+    Two adapts with the same name ARE the same adapt as far as everything
+    downstream is concerned — the per-adapt Master store is keyed by name,
+    so one would silently take the other's Master, and the widget keys built
+    from it collide outright and take the page down with them.
+
+    It happens the moment anyone uses the HTML uploader properly: every
+    model folder on earth calls its email index.html, so three of them is
+    three adapts all called "index.html". The second and third become
+    "index.html (2)" and "index.html (3)", which is what a person would
+    have called them anyway.
+    """
+    taken: set = set()
+    for job in jobs or []:
+        base = str(job.get(key) or "").strip() or "email"
+        name, suffix = base, 1
+        while name in taken:
+            suffix += 1
+            name = f"{base} ({suffix})"
+        taken.add(name)
+        job[key] = name
+    return jobs
+
+
 def _is_junk(path: str) -> bool:
     if any(path.startswith(p) for p in _JUNK_PREFIXES):
         return True

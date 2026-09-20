@@ -382,6 +382,69 @@ section[data-testid="stSidebar"] * {{ color:#E8F0FA; }}
     font-size:.665rem; color:#9FBBDD; letter-spacing:.02em; margin-top:.15rem;
 }}
 
+/* ---- the primary action, at the head of the navigation rail ----
+   Run QA used to sit in the Validation Options card, which is fine until
+   the run produces a report several thousand pixels long: re-running then
+   means scrolling all the way back up to find the button. The rail does
+   not scroll, so the button is always in reach from wherever you are.
+
+   It is styled here rather than inheriting the main-area primary button
+   because the rail is dark navy and the page is not — the same gradient
+   that reads as "primary" on a pale canvas nearly disappears on it. This
+   one is a step lighter at the top, carries an inner highlight, and is
+   bordered in translucent white so it lifts off the navy. */
+.dq-side-action {{ height:0; }}
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"]:has(
+    > [data-testid="stElementContainer"] .dq-side-action) {{
+    gap:.35rem;
+    padding:0 0 1rem 0;
+    margin:-.15rem 0 .95rem 0;
+    border-bottom:1px solid rgba(255,255,255,.09);
+}}
+/* Matched WITHOUT the usual `.stButton >` parent: passing `help=` to the
+   button wraps it in a tooltip target instead, and the child combinator
+   then quietly matches nothing at all — which is how this shipped once
+   already, looking correct only because Streamlit's own primary colour
+   happens to be the same blue. */
+[data-testid="stSidebar"] .stTooltipHoverTarget {{ width:100%; }}
+[data-testid="stSidebar"] button[kind="primary"],
+[data-testid="stSidebar"] button[data-testid="stBaseButton-primary"] {{
+    width:100%;
+    background:linear-gradient(180deg,#3688F2 0%,{BRAND} 52%,{BRAND_DARK} 100%);
+    border:1px solid rgba(255,255,255,.24);
+    color:#FFFFFF !important;
+    font-weight:750; font-size:.86rem;
+    min-height:2.6rem; border-radius:11px;
+    box-shadow:0 10px 22px -10px rgba(54,136,242,.95),
+               inset 0 1px 0 rgba(255,255,255,.26);
+}}
+[data-testid="stSidebar"] button[kind="primary"] *,
+[data-testid="stSidebar"] button[data-testid="stBaseButton-primary"] * {{
+    color:#FFFFFF !important;
+}}
+[data-testid="stSidebar"] button[kind="primary"]:hover,
+[data-testid="stSidebar"] button[data-testid="stBaseButton-primary"]:hover {{
+    background:linear-gradient(180deg,#4E9BF7 0%,#2374DE 52%,{BRAND_DARK} 100%);
+    border-color:rgba(255,255,255,.38);
+}}
+[data-testid="stSidebar"] button[kind="primary"]:focus:not(:active),
+[data-testid="stSidebar"] button[data-testid="stBaseButton-primary"]:focus:not(:active) {{
+    box-shadow:0 0 0 3px rgba(95,165,245,.45);
+}}
+/* The readiness line under it: what this run would actually cover. */
+.dq-side-ready {{
+    display:flex; flex-wrap:wrap; gap:.3rem .5rem;
+    font-size:.655rem; letter-spacing:.02em; line-height:1.3;
+    padding:.12rem .12rem 0 .12rem;
+}}
+.dq-side-ready span {{
+    display:inline-flex; align-items:center; gap:.25rem;
+    color:#9FBBDD;
+}}
+.dq-side-ready span.ok b {{ color:#BFE3CF; font-weight:650; }}
+.dq-side-ready span.warn b {{ color:#FFD79A; font-weight:650; }}
+.dq-side-ready b {{ font-weight:650; }}
+
 .dq-navlabel {{
     font-size:.62rem; font-weight:800; letter-spacing:.15em;
     text-transform:uppercase; color:#7C9AC0; margin:.15rem .35rem .45rem .35rem;
@@ -1222,6 +1285,13 @@ def render_topbar(title: str, subtitle: str = "", chips: Sequence[str] = ()) -> 
     )
 
 
+# Where `render_sidebar` parks the container that `sidebar_action` fills.
+# In session_state rather than a module global: the module is shared by
+# every browser session in the process, and a container belongs to exactly
+# one of them.
+_ACTION_SLOT_KEY = "_dq_sidebar_action_slot"
+
+
 def render_sidebar(nav_items: Sequence[Tuple[str, str]], key: str = "dq_nav") -> str:
     """The dark navigation rail. Returns the selected view's id.
 
@@ -1229,10 +1299,16 @@ def render_sidebar(nav_items: Sequence[Tuple[str, str]], key: str = "dq_nav") ->
     match `_NAV_ICONS` above, which is what puts the right line icon on
     each row.
 
-    The rail carries the brandmark and the menu, and nothing else. It used
-    to end in a block of status chips, a strapline and a watermark; those
-    are gone, and `sidebar_prefs()` below now hands that space to the
-    handful of view switches worth reaching without opening Settings.
+    The rail carries the brandmark, the workspace's primary action, and
+    the menu. It used to end in a block of status chips, a strapline and a
+    watermark; those are gone, and `sidebar_prefs()` below now hands that
+    space to the handful of view switches worth reaching without opening
+    Settings.
+
+    The action itself cannot be drawn here — whether a run is ready to go
+    is not known until the uploaders further down the script have been
+    rendered — so this reserves a container for it and `sidebar_action()`
+    fills it in place, however much later that happens.
     """
     ids = [i for i, _ in nav_items]
     labels = {i: l for i, l in nav_items}
@@ -1254,9 +1330,12 @@ def render_sidebar(nav_items: Sequence[Tuple[str, str]], key: str = "dq_nav") ->
                 <div class="dq-brandmark-tag">Validate. Compare. Verify.</div>
               </div>
             </div>
-            <div class="dq-navlabel">Menu</div>
             """
         )
+        # The primary action's slot. It is filled much later in the script,
+        # once the run's readiness is known — see `sidebar_action()`.
+        st.session_state[_ACTION_SLOT_KEY] = st.container()
+        _md('<div class="dq-navlabel">Menu</div>')
         choice = st.radio(
             "Navigation",
             options=ids,
@@ -1266,6 +1345,46 @@ def render_sidebar(nav_items: Sequence[Tuple[str, str]], key: str = "dq_nav") ->
         )
 
     return choice
+
+
+@contextmanager
+def sidebar_action(hidden: bool = False):
+    """Fills the slot `render_sidebar()` left under the brandmark.
+
+    The caller's widgets are created wherever the caller happens to be in
+    the script, but land at the head of the rail. `hidden` hides the whole
+    block on views that are not the workspace — the widgets are still
+    created, because Streamlit drops the state of anything it did not
+    render and the caller's `if run_clicked:` still has to have an answer.
+
+    Falls back to appending to the sidebar if no slot was reserved, so this
+    can never be the thing that takes the page down.
+    """
+    slot = st.session_state.get(_ACTION_SLOT_KEY)
+    target = slot if slot is not None else st.sidebar
+    with target:
+        _md(
+            '<div class="dq-side-action"></div>'
+            + ('<div class="dq-hide"></div>' if hidden else "")
+        )
+        yield
+
+
+def sidebar_ready_note(*bits: Tuple[str, bool]) -> None:
+    """The one-line "what this run would cover" note under the rail's
+    action. Each bit is `(text, is_ready)`."""
+    if not bits:
+        return
+    _md(
+        '<div class="dq-side-ready">'
+        + "".join(
+            f'<span class="{"ok" if ready else "warn"}">'
+            f'{_icon("check-circle" if ready else "alert-triangle", 11)}'
+            f'&nbsp;<b>{_esc(text)}</b></span>'
+            for text, ready in bits
+        )
+        + "</div>"
+    )
 
 
 @contextmanager
