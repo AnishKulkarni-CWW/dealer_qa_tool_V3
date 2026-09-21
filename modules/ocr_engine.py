@@ -93,7 +93,7 @@ so behaviour is never worse than before.
 
 import hashlib
 import re
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Iterable, List, Optional, Sequence, Tuple, Union
@@ -275,11 +275,36 @@ LOCAL_INK_BIAS = 8
 # A challenger has to beat the line it is challenging by this margin, which
 # keeps a merely-equal reading from changing a correct one: on a real
 # bulletin page the model badge scores 260 as "THE7" and 264 as "THE?".
+#
+# The margin is applied only to the words the two readings actually
+# DISAGREE about. Applied to the whole line it does not survive contact
+# with a long one — measured on the 5LWB banner:
+#
+#     incumbent    THIS FESTIVE SEASON, GET THE BMW 5SLWB   (2601)
+#     challenger   THIS FESTIVE SEASON, GET THE BMW SLWB    (2774)
+#
+# One word in seven is wrong and the six they agree on dilute it to a 6%
+# difference, under the margin, so the worse reading kept the line. On the
+# disputed word alone it is 135 against 308, which is decisive — and the
+# margin goes on doing its job on the short lines it was measured on, where
+# the whole line IS the disputed word.
 RENDITION_LINE_SWITCH_MARGIN = 1.12
 
 # Two readings are of the SAME line when their core bands overlap by more
-# than this fraction of the shorter band.
+# than this fraction of the shorter band...
 RENDITION_LINE_OVERLAP_RATIO = 0.5
+
+# ...and are within this much of each other in SIZE. Overlap alone is not
+# enough: a rendition that reads a line badly can measure it at twice its
+# real height, and a line's measured height is what the font-size banding
+# downstream uses to tell a headline from a subheadline. Measured on the
+# X5 master, where one rendition returned the closing line at 33px against
+# the 15px every other rendition and the artwork itself agree on — letting
+# it take the line put a 33px "subheadline" in the middle of a banner whose
+# real bands are 42 and 14, and the actual subheadline was demoted out of
+# the field entirely. Two readings that disagree by this much about how big
+# a line is are not arguing about the same line.
+RENDITION_LINE_HEIGHT_RATIO = 1.8
 
 # How a line's reading is scored for that comparison. Each word counts its
 # alphanumeric characters times its confidence — so a fuller read of the
@@ -1272,8 +1297,11 @@ def _bands_overlap(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     overlap = min(a[1], b[1]) - max(a[0], b[0])
     if overlap <= 0:
         return 0.0
-    shortest = min(a[1] - a[0], b[1] - b[0])
+    heights = (a[1] - a[0], b[1] - b[0])
+    shortest, tallest = min(heights), max(heights)
     if shortest <= 0:
+        return 0.0
+    if tallest > shortest * RENDITION_LINE_HEIGHT_RATIO:
         return 0.0
     agreement = overlap / shortest
     return agreement if agreement >= RENDITION_LINE_OVERLAP_RATIO else 0.0
@@ -1362,6 +1390,59 @@ def _strip_edge_debris_words(words: List[dict]) -> List[dict]:
     return kept
 
 
+def _disputed_words(incumbent: List[dict], challenger: List[dict]):
+    """The words two readings of one line do NOT have in common.
+
+    Matched as multisets of the exact word text, so a word read identically
+    by both — which is most of a line, most of the time — carries no weight
+    either way and cannot dilute the disagreement.
+    """
+    shared = Counter(w.get("text") or "" for w in incumbent) & \
+        Counter(w.get("text") or "" for w in challenger)
+
+    def unshared(words: List[dict]) -> List[dict]:
+        remaining = dict(shared)
+        out = []
+        for word in words:
+            text = word.get("text") or ""
+            if remaining.get(text):
+                remaining[text] -= 1
+            else:
+                out.append(word)
+        return out
+
+    return unshared(incumbent), unshared(challenger)
+
+
+def _challenger_wins(incumbent: List[dict], challenger: List[dict]) -> bool:
+    """Whether a rendition's reading of a line should replace the one held.
+
+    Only the disputed words are scored, and the challenger must beat them by
+    RENDITION_LINE_SWITCH_MARGIN — see the block above that constant. A
+    challenger that read nothing the incumbent has not already got never
+    wins, so a reading can never be replaced by a shorter one that says the
+    same thing.
+    """
+    ours, theirs = _disputed_words(incumbent, challenger)
+    if not theirs:
+        return False
+    if not ours:
+        # The challenger disputes nothing — it only ADDS to what the
+        # incumbent read. That has to be judged on the whole line, because
+        # "nothing to beat" would otherwise make every addition a winner,
+        # and the commonest addition is a scrap of photograph on the end of
+        # an otherwise identical line ("...BENEFITS. at FG"). Against the
+        # whole line a scrap is a rounding error and cannot clear the
+        # margin, while a genuinely recovered word is a large part of the
+        # line and still can.
+        return (_line_reading_score(challenger)
+                > _line_reading_score(incumbent) * RENDITION_LINE_SWITCH_MARGIN)
+    capitals = _line_is_capitals(incumbent) or _line_is_capitals(challenger)
+    held = sum(_word_reading_score(w, capitals) for w in ours)
+    offered = sum(_word_reading_score(w, capitals) for w in theirs)
+    return offered > held * RENDITION_LINE_SWITCH_MARGIN
+
+
 def _read_lines_of(boxes: List[dict]) -> List[dict]:
     """One rendition's reading, as a list of `{band, score, words}` lines."""
     reading: List[dict] = []
@@ -1438,7 +1519,7 @@ def _merge_rendition_lines(readings: List[Tuple[str, List[dict]]]) -> List[dict]
                     target, agreement = position, overlap
             if target is None:
                 continue
-            if line["score"] > slots[target]["score"] * RENDITION_LINE_SWITCH_MARGIN:
+            if _challenger_wins(slots[target]["words"], line["words"]):
                 # The slot keeps the skeleton's band, so that every later
                 # challenger is matched against the same stable geometry.
                 slots[target]["score"] = line["score"]

@@ -1146,18 +1146,51 @@ def run_dealer_panel_exact_match_qa(panel_lines: List[str], html_raw: str, confi
 # Dealer auto-detection from HTML
 # =========================================================
 
+def panel_presence_ratio(row: "DealerRow", visible_norm: str) -> float:
+    """How much of a dealer row's own panel actually appears in the email.
+
+    Used to tell one BRANCH of a dealer from another. Returns the fraction
+    of the row's panel lines found in the email's visible text, so a row
+    with a long panel is not favoured over a short one just for being long.
+    """
+    lines = [ln for ln in panel_text_to_lines(row.panel_text) if ln.strip()]
+    if not lines:
+        return 0.0
+    hits = 0
+    for line in lines:
+        needle = normalize_text(line)
+        if needle and needle in visible_norm:
+            hits += 1
+    return hits / len(lines)
+
+
 def detect_dealer_from_html(html_raw: str, dealer_rows: List[DealerRow]) -> Optional[DealerRow]:
     """
     Finds which dealer (from the Excel rows) this HTML email belongs to,
     by looking for a 'BMW <Dealer Name>' heading in the HTML and matching
     it against each row's Dealer column / first panel line.
+
+    ONE DEALER, SEVERAL BRANCHES
+    ----------------------------
+    A dealer name does not identify a row on its own. The sheet carries
+    three rows called "Deutsche Motoren" — Delhi, Bengaluru and Kozhikode —
+    and every one of them matches the "BMW Deutsche Motoren" heading in
+    every one of their emails equally well. Taking the first meant a
+    Bengaluru mailer was compared against the Delhi panel, and Content QA
+    reported all nineteen of Delhi's address lines missing from an email
+    that was entirely correct.
+
+    So when the name matches several rows, the PANEL decides: whichever
+    row's own address block is actually present in this email is the row
+    this email was built from. Where the panels cannot tell them apart
+    either, the first still wins, exactly as before.
     """
     soup = BeautifulSoup(html_raw, "html.parser")
     visible = html_to_visible_text(soup)
     visible_norm = normalize_text(visible)
 
-    best_row = None
     best_len = 0
+    matched: List[DealerRow] = []
     for row in dealer_rows:
         dealer_name = row.dealer.strip()
         if not dealer_name:
@@ -1167,14 +1200,26 @@ def detect_dealer_from_html(html_raw: str, dealer_rows: List[DealerRow]) -> Opti
         if panel_lines:
             candidates.add(panel_lines[0])
 
+        row_len = 0
         for cand in candidates:
             cn = normalize_text(cand)
             if cn and cn in visible_norm:
-                if len(cn) > best_len:
-                    best_len = len(cn)
-                    best_row = row
+                row_len = max(row_len, len(cn))
 
-    return best_row
+        if not row_len:
+            continue
+        if row_len > best_len:
+            best_len, matched = row_len, [row]
+        elif row_len == best_len:
+            matched.append(row)
+
+    if not matched:
+        return None
+    if len(matched) == 1:
+        return matched[0]
+    # `max` keeps the first row on a tie, so a set of branches whose panels
+    # are all equally (un)present resolves exactly as it used to.
+    return max(matched, key=lambda r: panel_presence_ratio(r, visible_norm))
 
 
 # =========================================================
@@ -1946,6 +1991,52 @@ def run_image_size_qa(html_raw: str, images_source) -> List[StyleIssue]:
 # Content comparison
 # =========================================================
 
+# How many consecutive email lines may be joined back together while
+# looking for one Excel panel line (see `find_wrapped_match`). Four covers
+# the long addresses the templates wrap; more than that and "consecutive
+# lines" stops meaning anything.
+WRAPPED_LINE_MAX_SPAN = 4
+
+# ...and the shortest target worth trying it on. A short label is a
+# substring of half the email; stitching lines together to find one would
+# invent matches rather than recover them.
+WRAPPED_LINE_MIN_CHARS = 20
+
+
+def find_wrapped_match(html_lines: List[str], target: str) -> Optional[Tuple[int, str]]:
+    """One Excel panel line that the email rendered across SEVERAL lines.
+
+    The sheet holds an address as a single cell line:
+
+        222, 220A Whitefield Main Road, Sadaramangala, Whitefield,
+        Bengaluru, Karnataka, India - 560048.
+
+    and the email sets it as three, because that is what fits the panel.
+    Line-by-line matching cannot see it, so a perfectly correct address
+    was reported missing.
+
+    Deliberately EXACT: consecutive lines are joined and the result has to
+    equal the target once normalised. Nothing fuzzy happens here, so this
+    can only ever recover a line the email really does contain — a wrapped
+    address with a genuine difference in it stays missing, which is the
+    answer a reviewer needs.
+    """
+    t = normalize_text(target)
+    if len(t) < WRAPPED_LINE_MIN_CHARS:
+        return None
+    for start in range(len(html_lines)):
+        for span in range(2, WRAPPED_LINE_MAX_SPAN + 1):
+            window = html_lines[start:start + span]
+            if len(window) < span:
+                break
+            joined = normalize_text(" ".join(window))
+            if joined == t:
+                return start, " ".join(window)
+            if len(joined) > len(t):
+                break        # already longer than the target; widening cannot help
+    return None
+
+
 def compare_source_to_html(source_lines: List[str], html_raw: str) -> pd.DataFrame:
     soup = BeautifulSoup(html_raw, "html.parser")
     html_visible = html_to_visible_text(soup)
@@ -1955,7 +2046,7 @@ def compare_source_to_html(source_lines: List[str], html_raw: str) -> pd.DataFra
 
     results: List[CheckResult] = []
     for item in source_items:
-        match = find_best_match(html_lines, item)
+        match = find_best_match(html_lines, item) or find_wrapped_match(html_lines, item)
         status = "Present" if match else "Missing"
         results.append(CheckResult(item=item, status=status))
 
@@ -3550,8 +3641,13 @@ with ext_theme.hidden(not ext_workflow_visible):
                         else:
                             effective_dealer_name = ""
 
+                        # Everything this run actually used, gathered into one
+                        # panel rather than four grey captions scattered down the
+                        # card — see `ext_theme.run_notes`. Collected here, in the
+                        # order the run works them out, and rendered once below.
+                        _ext_run_notes: List[Tuple[str, str]] = []
                         if ext_master_ocr_warning:
-                            st.caption(f"Master Banner OCR note: {ext_master_ocr_warning}")
+                            _ext_run_notes.append(("Master banner OCR", ext_master_ocr_warning))
 
                         # Manual Body Comparison (As Is / To Be) always overrides the
                         # master-derived body text if the user typed a "To Be" value —
@@ -3559,8 +3655,10 @@ with ext_theme.hidden(not ext_workflow_visible):
                         if job_body_to_be.strip():
                             expected_body_text = job_body_to_be
 
-                        if ext_master_banner_note:
-                            st.caption(ext_master_banner_note)
+                        _ext_run_notes.append(
+                            ("Master", ext_master_banner_note
+                             or "No Master JPG, PDF or HTML ZIP was supplied for this email, "
+                                "so nothing was read off a master creative."))
 
                         # Which guideline each banner was read as. Worth
                         # saying out loud: if a Headline comes back looking
@@ -3615,7 +3713,7 @@ with ext_theme.hidden(not ext_workflow_visible):
                             ext_input_banner_ocr_text = ocr_res.text
                             ext_input_banner_engine = ocr_res.engine_used
                             if ocr_res.warning:
-                                st.caption(f"OCR note: {ocr_res.warning}")
+                                _ext_run_notes.append(("Email banner OCR", ocr_res.warning))
                             # Also run structured line extraction so Headline / Subheadline
                             # can be matched against their own font-size band instead of
                             # the whole banner text blob (fixes headline+subheadline
@@ -3652,12 +3750,15 @@ with ext_theme.hidden(not ext_workflow_visible):
                                     ext_input_banner_clustered_lines.layout_used,
                                     ext_input_banner_clustered_lines.layout_used or "unknown")
                             )
-                        if _ext_layout_bits:
-                            st.caption(
-                                "Banner layout: " + "; ".join(_ext_layout_bits)
-                                + ("." if ext_banner_layout == ext_ocr.BANNER_LAYOUT_AUTO
-                                   else " (chosen by hand in Validation Options).")
-                            )
+                        _ext_run_notes.append((
+                            "Banner layout",
+                            ("; ".join(_ext_layout_bits)
+                             + ("." if ext_banner_layout == ext_ocr.BANNER_LAYOUT_AUTO
+                                else " (chosen by hand in Validation Options)."))
+                            if _ext_layout_bits else
+                            "Neither banner could be read, so no guideline was detected."
+                        ))
+                        ext_theme.run_notes(_ext_run_notes)
 
                         ext_html_body_text = html_to_visible_text(BeautifulSoup(job["html"], "html.parser"))
                         # Dealer-in-Body must only look at the greeting/body-copy

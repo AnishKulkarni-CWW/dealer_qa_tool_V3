@@ -135,6 +135,42 @@ def _table_html(df: pd.DataFrame, status_col: str, start_index: int = 1) -> str:
     )
 
 
+# Which column carries the name of the thing checked, and which carries
+# the explanation — in the order the app's own tables use them.
+_SINGLE_LABEL_COLS = ("item", "check", "rule", "category", "module")
+_SINGLE_DETAIL_COLS = ("detail", "expected", "found")
+
+
+def _first_filled(row, columns) -> str:
+    for col in columns:
+        text = _cell(row.get(col, "")).strip()
+        if text:
+            return text
+    return ""
+
+
+def render_single_check(row, status_col: str) -> None:
+    """A section holding exactly ONE check, rendered on one line.
+
+    Four KPI tiles, a chip strip, four tabs and a table, all to say "1 of 1
+    passed", is most of a screen spent on a single sentence — and a report
+    with several such sections becomes mostly furniture. The verdict, what
+    was checked and why are the entire content, so that is the entire row.
+    """
+    cls = _status_class(row.get(status_col, ""))
+    label = _first_filled(row, _SINGLE_LABEL_COLS)
+    detail = _first_filled(row, _SINGLE_DETAIL_COLS)
+    status = _cell(row.get(status_col, "")) or "—"
+    st.markdown(
+        f'<div class="oq-single oq-{cls or "plain"}">'
+        f'<span class="oq-status {cls}">{status}</span>'
+        + (f'<span class="oq-single-label">{label}</span>' if label else "")
+        + (f'<span class="oq-single-detail">{detail}</span>' if detail else "")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def _render_table(df: pd.DataFrame, status_col: str) -> None:
     html = _table_html(df, status_col)
     if html:
@@ -185,6 +221,13 @@ def render_qa_table(
 
     if status_col not in df.columns:
         _render_table(df, status_col)
+        return
+
+    # One check needs one line, not the whole apparatus — see
+    # `render_single_check`. The tiles above it are suppressed by
+    # `render_stat_row` for the same reason.
+    if len(df) == 1:
+        render_single_check(df.iloc[0], status_col)
         return
 
     classes = df[status_col].apply(_status_class)
@@ -268,9 +311,16 @@ def _open_dialog(df: pd.DataFrame, status_col: str, table_key: str) -> None:
 
 def render_stat_row(passed: int, warnings: int, failed: int, total: Optional[int] = None,
                     total_label: str = "Total checks") -> None:
-    """The four KPI tiles used above every result table."""
+    """The four KPI tiles used above every result table.
+
+    Draws nothing at all for a section with one check or none: four tiles
+    reading 1/1/0/0 say less than the single line underneath them already
+    does, and cost a screenful to say it.
+    """
     if total is None:
         total = passed + warnings + failed
+    if total <= 1:
+        return
     _theme.stat_tiles([
         (total_label, total, "total", "doc-stack", ""),
         ("Passed", passed, "ok", "check-circle",

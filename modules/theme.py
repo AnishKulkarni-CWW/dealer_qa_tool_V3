@@ -93,6 +93,14 @@ WARN_BG = "#FEF6E7"
 WARN_LINE = "#FBD9A1"
 WARN_SOLID = "#F79009"
 
+# The band that sits behind every section heading. Deliberately a cool
+# neutral rather than the brand blue: it has to be obvious enough to find
+# while scrolling past without reading, and quiet enough that the coloured
+# icon tile and the status pills on top of it keep their meaning.
+BAND = "#EEF3FA"
+BAND_TOP = "#F5F8FD"
+BAND_EDGE = "#D9E4F2"
+
 # The "app is busy" bar across the very top of the window. Deliberately NOT
 # the brand blue: the page is already mostly brand blue, and a progress bar
 # that blends into the chrome is a progress bar nobody notices. Amber reads
@@ -415,8 +423,9 @@ section[data-testid="stSidebar"] * {{ color:#E8F0FA; }}
     color:#FFFFFF !important;
     font-weight:750; font-size:.86rem;
     min-height:2.6rem; border-radius:11px;
-    box-shadow:0 10px 22px -10px rgba(54,136,242,.95),
-               inset 0 1px 0 rgba(255,255,255,.26);
+    /* No drop glow. It read as a smear of light under the button on the
+       navy rail rather than as depth. */
+    box-shadow:none;
 }}
 [data-testid="stSidebar"] button[kind="primary"] *,
 [data-testid="stSidebar"] button[data-testid="stBaseButton-primary"] * {{
@@ -652,10 +661,27 @@ section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {{
 }}
 
 /* Card headings are centred too, one clear step below a section band, so
-   every card announces itself at a glance instead of having to be read. */
+   every card announces itself at a glance instead of having to be read.
+
+   Each one sits on a tinted band running the full width of whatever holds
+   it. On a report that scrolls for thousands of pixels the title alone is
+   not enough — you have to read it to know a new section has started. A
+   band is visible in peripheral vision, so scrolling past one registers
+   without looking directly at it. */
 .dq-head {{
     display:flex; align-items:center; justify-content:center;
-    text-align:center; gap:.7rem; margin:0 0 .45rem 0; flex-wrap:wrap;
+    text-align:center; gap:.7rem; flex-wrap:wrap;
+    margin:0 0 .75rem 0; padding:.8rem 1rem .75rem 1rem;
+    background:linear-gradient(180deg,{BAND_TOP} 0%,{BAND} 100%);
+    border:1px solid {BAND_EDGE}; border-radius:12px;
+}}
+/* Inside a card the band goes edge to edge, cancelling the card's own
+   padding, and takes the card's top corners as its own. */
+.dq-head:has(.dq-card-mark) {{
+    margin:-1.15rem -1.25rem 1rem -1.25rem;
+    padding:.95rem 1.25rem .9rem 1.25rem;
+    border-width:0 0 1px 0;
+    border-radius:{RADIUS} {RADIUS} 0 0;
 }}
 .dq-card-mark {{ display:none; }}
 .dq-head-ico {{
@@ -1069,6 +1095,41 @@ table.oq-table tr.oq-pass:hover td {{ background:{OK_BG}; }}
 .oq-status.pass {{ color:{OK};   background:{OK_BG};   border-color:{OK_LINE}; }}
 .oq-status.warn {{ color:{WARN}; background:{WARN_BG}; border-color:{WARN_LINE}; }}
 .oq-status.fail {{ color:{BAD};  background:{BAD_BG};  border-color:{BAD_LINE}; }}
+
+/* What a run used — see theme.run_notes. Bordered and labelled so it reads
+   as a record of the run rather than as four stray captions. */
+.dq-runnotes {{
+    border:1px solid {BAND_EDGE}; border-radius:11px;
+    background:{BAND_TOP};
+    padding:.55rem .75rem; margin:.1rem 0 .7rem 0;
+    display:flex; flex-direction:column; gap:.3rem;
+}}
+.dq-runnote {{
+    display:flex; gap:.6rem; align-items:baseline;
+    font-size:.775rem; line-height:1.45;
+}}
+.dq-runnote-k {{
+    flex:none; min-width:11ch; color:{BRAND_DARK};
+    font-weight:700; letter-spacing:.01em;
+}}
+.dq-runnote-v {{ color:{INK_SOFT}; min-width:0; }}
+@media (max-width:820px) {{
+    .dq-runnote {{ flex-direction:column; gap:.05rem; }}
+}}
+
+/* A section with exactly one check: the verdict, what was checked and why,
+   on one line. See results_ui.render_single_check for why. */
+.oq-single {{
+    display:flex; align-items:center; gap:.6rem; flex-wrap:wrap;
+    padding:.6rem .85rem; border-radius:11px;
+    border:1px solid {LINE}; background:{WHITE};
+    font-size:.845rem; line-height:1.5;
+}}
+.oq-single.pass {{ border-color:{OK_LINE};   background:{OK_BG}; }}
+.oq-single.warn {{ border-color:{WARN_LINE}; background:{WARN_BG}; }}
+.oq-single.fail {{ border-color:{BAD_LINE};  background:{BAD_BG}; }}
+.oq-single-label {{ font-weight:700; color:{INK}; }}
+.oq-single-detail {{ color:{INK_SOFT}; flex:1 1 16ch; min-width:0; }}
 
 .oq-empty {{
     display:flex; align-items:center; gap:.55rem;
@@ -1504,6 +1565,32 @@ def banner(text_html: str, tone: str = "info", icon_name: str = "info") -> None:
     """A coloured inline message. `text_html` is inserted as-is, so callers
     that need <b>/<br> can pass them; escape anything user-supplied."""
     _md(f'<div class="dq-banner {tone}">{_icon(icon_name, 17)}<div>{text_html}</div></div>')
+
+
+def run_notes(notes: Sequence[Tuple[str, str]]) -> None:
+    """What a run actually used, as one labelled panel.
+
+    These four facts — which master was read, how it was cropped, which OCR
+    engine answered, which guideline each banner was read as — are the
+    first things anyone asks when a result looks wrong. They used to be
+    `st.caption` lines scattered down the card, small and grey and easy to
+    scroll straight past, and each one vanished entirely whenever its value
+    happened to be empty, so "no master was supplied" looked exactly like
+    "everything is fine". One panel, always present, every line accounted
+    for.
+    """
+    rows = [(label, text) for label, text in (notes or []) if str(text or "").strip()]
+    if not rows:
+        return
+    _md(
+        '<div class="dq-runnotes">'
+        + "".join(
+            f'<div class="dq-runnote"><span class="dq-runnote-k">{_esc(label)}</span>'
+            f'<span class="dq-runnote-v">{_esc(text)}</span></div>'
+            for label, text in rows
+        )
+        + "</div>"
+    )
 
 
 def section_title(title: str, subtitle: str = "", icon_name: str = "") -> None:
