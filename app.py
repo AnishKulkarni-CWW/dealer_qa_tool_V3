@@ -3641,8 +3641,13 @@ with ext_theme.hidden(not ext_workflow_visible):
                         else:
                             effective_dealer_name = ""
 
+                        # Everything this run actually used, gathered into one
+                        # panel rather than four grey captions scattered down the
+                        # card — see `ext_theme.run_notes`. Collected here, in the
+                        # order the run works them out, and rendered once below.
+                        _ext_run_notes: List[Tuple[str, str]] = []
                         if ext_master_ocr_warning:
-                            st.caption(f"Master Banner OCR note: {ext_master_ocr_warning}")
+                            _ext_run_notes.append(("Master banner OCR", ext_master_ocr_warning))
 
                         # Manual Body Comparison (As Is / To Be) always overrides the
                         # master-derived body text if the user typed a "To Be" value —
@@ -3650,8 +3655,10 @@ with ext_theme.hidden(not ext_workflow_visible):
                         if job_body_to_be.strip():
                             expected_body_text = job_body_to_be
 
-                        if ext_master_banner_note:
-                            st.caption(ext_master_banner_note)
+                        _ext_run_notes.append(
+                            ("Master", ext_master_banner_note
+                             or "No Master JPG, PDF or HTML ZIP was supplied for this email, "
+                                "so nothing was read off a master creative."))
 
                         # Which guideline each banner was read as. Worth
                         # saying out loud: if a Headline comes back looking
@@ -3706,7 +3713,7 @@ with ext_theme.hidden(not ext_workflow_visible):
                             ext_input_banner_ocr_text = ocr_res.text
                             ext_input_banner_engine = ocr_res.engine_used
                             if ocr_res.warning:
-                                st.caption(f"OCR note: {ocr_res.warning}")
+                                _ext_run_notes.append(("Email banner OCR", ocr_res.warning))
                             # Also run structured line extraction so Headline / Subheadline
                             # can be matched against their own font-size band instead of
                             # the whole banner text blob (fixes headline+subheadline
@@ -3743,12 +3750,15 @@ with ext_theme.hidden(not ext_workflow_visible):
                                     ext_input_banner_clustered_lines.layout_used,
                                     ext_input_banner_clustered_lines.layout_used or "unknown")
                             )
-                        if _ext_layout_bits:
-                            st.caption(
-                                "Banner layout: " + "; ".join(_ext_layout_bits)
-                                + ("." if ext_banner_layout == ext_ocr.BANNER_LAYOUT_AUTO
-                                   else " (chosen by hand in Validation Options).")
-                            )
+                        _ext_run_notes.append((
+                            "Banner layout",
+                            ("; ".join(_ext_layout_bits)
+                             + ("." if ext_banner_layout == ext_ocr.BANNER_LAYOUT_AUTO
+                                else " (chosen by hand in Validation Options)."))
+                            if _ext_layout_bits else
+                            "Neither banner could be read, so no guideline was detected."
+                        ))
+                        ext_theme.run_notes(_ext_run_notes)
 
                         ext_html_body_text = html_to_visible_text(BeautifulSoup(job["html"], "html.parser"))
                         # Dealer-in-Body must only look at the greeting/body-copy
