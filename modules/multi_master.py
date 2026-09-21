@@ -45,6 +45,7 @@ exactly as it always has.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -161,8 +162,37 @@ def clear_all() -> None:
     st.session_state[_STORE_KEY] = {}
 
 
+# How much of the adapt's own name survives into a widget key. The rest of
+# the key is a digest of the WHOLE name, so this is only about keeping keys
+# legible in a debugger — never about telling two adapts apart.
+_KEY_READABLE_CHARS = 48
+
+
 def _safe_key(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9]+", "_", name or "")[:60]
+    """A Streamlit widget key that is unique to `name`, always.
+
+    This used to be the name with its punctuation replaced, truncated to 60
+    characters — and that truncation was a crash. A campaign zip names its
+    adapts "<zip stem> / <model>", and a real zip stem is long:
+
+        P_2188754_BMW_NSC_DLR_Deutsche Bengaluru_..._Sep26 / 2GC
+        P_2188754_BMW_NSC_DLR_Deutsche Bengaluru_..._Sep26 / 3LWB
+
+    Those differ only in the last few characters, which is exactly what 60
+    characters cut off. All six models in the bundle produced the SAME key,
+    the second adapt's uploader asked Streamlit for a key the first had
+    already taken, and the whole page died with StreamlitDuplicateElementKey
+    before a single check could run. It only looked like a "more than two
+    models" bug because short names — separate per-model zips, or a bundle
+    with a short stem — happen to survive the truncation intact.
+
+    So the readable part is still a prefix, but what makes the key UNIQUE is
+    a digest of the entire name appended to it. Two different adapts cannot
+    collide however long their names are, or how much they share.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", name or "")
+    digest = hashlib.blake2b((name or "").encode("utf-8"), digest_size=5).hexdigest()
+    return f"{cleaned[:_KEY_READABLE_CHARS]}_{digest}"
 
 
 # --------------------------------------------------------------------------
@@ -210,6 +240,11 @@ def render_panel(
                   fresh widget key (st.file_uploader cannot be emptied
                   from code any other way).
     """
+    # Defensive: one block per DISTINCT adapt. Callers are expected to hand
+    # over unique names (see `model_bundle.uniquify_names`), but a repeated
+    # name here would ask Streamlit for a widget key it had already given
+    # out, and that takes the whole page down rather than degrading.
+    job_names = list(dict.fromkeys(job_names or []))
     prune_to(job_names)
 
     if not job_names:

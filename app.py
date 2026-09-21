@@ -2585,6 +2585,11 @@ with ext_theme.hidden(not ext_workflow_visible):
                                 "bundled_masters": _m.master_images,
                             })
 
+            # No two adapts may share a name. Everything per-adapt — the
+            # Master store, its widget keys, the results — is keyed by it,
+            # and three folders' worth of "index.html" is the ordinary case.
+            ext_model_bundle.uniquify_names(email_jobs)
+
             if email_jobs:
                 st.markdown(
                     '<div class="dq-kv">'
@@ -2694,16 +2699,34 @@ with ext_theme.hidden(not ext_workflow_visible):
                 unsafe_allow_html=True,
             )
 
-            _run_col, _clear_col = st.columns([2.1, 1])
-            with _run_col:
-                run_clicked = st.button(
-                    "Run QA Validation", type="primary", use_container_width=True)
-            with _clear_col:
-                clear_masters_clicked = st.button(
-                    "Clear masters", use_container_width=True,
-                    help="Removes every Master JPG / PDF / HTML ZIP and all typed Master text, "
-                         "both the global ones and every per-adapt override.",
-                )
+            clear_masters_clicked = st.button(
+                "Clear masters", use_container_width=True,
+                help="Removes every Master JPG / PDF / HTML ZIP and all typed Master text, "
+                     "both the global ones and every per-adapt override.",
+            )
+
+    # ---- The Run button, at the head of the navigation rail ----------
+    # It used to sit in the card above, which stops working as soon as a
+    # run produces a report several thousand pixels long — re-running then
+    # means scrolling all the way back to find it. The rail does not
+    # scroll, so there it is always in reach.
+    #
+    # It is CREATED here, at the point in the script where the run's
+    # readiness is finally known, and drawn into the slot the rail
+    # reserved for it. It is created on every view, hidden on the ones
+    # that are not the workspace, because `if run_clicked:` below still
+    # has to have an answer.
+    with ext_theme.sidebar_action(hidden=not ext_workflow_visible):
+        run_clicked = st.button(
+            "Run QA Validation", type="primary", use_container_width=True,
+            help="Runs every enabled check against every uploaded email.",
+        )
+        ext_theme.sidebar_ready_note(
+            (f"{len(dealer_rows)} dealer row(s)" if dealer_rows
+             else "No Excel sheet yet", bool(dealer_rows)),
+            (f"{len(email_jobs)} email(s)" if email_jobs
+             else "No email yet", bool(email_jobs)),
+        )
 
     if clear_masters_clicked:
         ext_multi_master.clear_all()
