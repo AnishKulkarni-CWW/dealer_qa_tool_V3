@@ -93,13 +93,24 @@ WARN_BG = "#FEF6E7"
 WARN_LINE = "#FBD9A1"
 WARN_SOLID = "#F79009"
 
-# The band that sits behind every section heading. Deliberately a cool
-# neutral rather than the brand blue: it has to be obvious enough to find
-# while scrolling past without reading, and quiet enough that the coloured
-# icon tile and the status pills on top of it keep their meaning.
-BAND = "#EEF3FA"
-BAND_TOP = "#F5F8FD"
-BAND_EDGE = "#D9E4F2"
+# The band that sits behind every section heading. A cool blue rather than
+# the brand blue: it has to be obvious enough to find while scrolling past
+# without reading, and quiet enough that the coloured icon tile and the
+# status pills on top of it keep their meaning.
+#
+# The first version of this was far too polite — #EEF3FA measured 1.11:1
+# against the white card it sits on, which is a tint you have to look for
+# rather than one you notice. These are a step down the same hue and
+# measure 1.48:1, and the heading's own subtitle is darkened to match so
+# it does not lose contrast on the way (BAND_SUB below).
+BAND = "#C3D6F0"
+BAND_TOP = "#D3E2F6"
+BAND_EDGE = "#A2BEE0"
+BAND_SUB = "#455568"          # subtitle ink ON the band — 5.2:1
+
+# The run-notes panel is NOT a section heading and must not read as one,
+# so it keeps the pale tint the bands have given up.
+NOTE_BG = "#F5F8FD"
 
 # The "app is busy" bar across the very top of the window. Deliberately NOT
 # the brand blue: the page is already mostly brand blue, and a progress bar
@@ -700,7 +711,7 @@ section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {{
     line-height:1.2; letter-spacing:-.02em;
 }}
 .dq-head-sub {{
-    font-size:.8rem; color:{MUTED}; margin-top:.25rem; line-height:1.5;
+    font-size:.8rem; color:{BAND_SUB}; margin-top:.25rem; line-height:1.5;
     max-width:62ch; margin-left:auto; margin-right:auto;
 }}
 .dq-head-right {{ flex:none; display:flex; align-items:center; gap:.4rem; }}
@@ -1100,7 +1111,7 @@ table.oq-table tr.oq-pass:hover td {{ background:{OK_BG}; }}
    as a record of the run rather than as four stray captions. */
 .dq-runnotes {{
     border:1px solid {BAND_EDGE}; border-radius:11px;
-    background:{BAND_TOP};
+    background:{NOTE_BG};
     padding:.55rem .75rem; margin:.1rem 0 .7rem 0;
     display:flex; flex-direction:column; gap:.3rem;
 }}
