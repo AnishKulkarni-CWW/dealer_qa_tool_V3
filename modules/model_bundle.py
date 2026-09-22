@@ -107,6 +107,39 @@ def uniquify_names(jobs: List[dict], key: str = "name") -> List[dict]:
     return jobs
 
 
+# Markers that say a file really is an HTML document. A dealer email need
+# not have <html> or <body> around it — plenty of templates are a bare
+# <table> — so the test is deliberately loose, and anything that opens with
+# a tag at all is taken at its word.
+_HTML_MARKERS = ("<html", "<!doctype html", "<body", "<head")
+
+
+def looks_like_html(text: str) -> bool:
+    """Whether a file with an .html name is actually an HTML document.
+
+    A real, measured case: a model zip whose `index.html` was a Python
+    source file saved under the wrong extension — it opened with
+    `import re` and happened to mention `<table` inside a string literal a
+    few hundred lines down. Nothing rejected it, so it went through the
+    whole run as an email, matched no dealer, and came back as "Could not
+    automatically match this email to a dealer from the Excel sheet" —
+    which sends a reviewer hunting through the spreadsheet for a problem
+    that is not there.
+
+    So: a document whose first non-blank character is a tag is HTML, and so
+    is one that carries any of the structural markers above. Anything else
+    is some other kind of file wearing an .html name, and saying so is far
+    more use than failing further down.
+    """
+    body = (text or "").lstrip("\ufeff \t\r\n")
+    if not body:
+        return False
+    if body[0] == "<":
+        return True
+    lowered = body[:4000].lower()
+    return any(marker in lowered for marker in _HTML_MARKERS)
+
+
 def _is_junk(path: str) -> bool:
     if any(path.startswith(p) for p in _JUNK_PREFIXES):
         return True
@@ -173,6 +206,7 @@ def extract_models(zip_source, source_name: str = "") -> Tuple[List[BundledModel
         multi = len(folders) > 1
 
         models: List[BundledModel] = []
+        rejected: List[str] = []
         for folder in folders:
             html_path = _pick_html(by_folder[folder])
             try:
@@ -180,6 +214,9 @@ def extract_models(zip_source, source_name: str = "") -> Tuple[List[BundledModel
             except Exception:
                 continue
             if not html_text.strip():
+                continue
+            if not looks_like_html(html_text):
+                rejected.append(html_path)
                 continue
 
             prefix = folder + "/" if folder else ""
@@ -236,6 +273,12 @@ def extract_models(zip_source, source_name: str = "") -> Tuple[List[BundledModel
             ))
 
     if not models:
+        if rejected:
+            return [], (
+                f"'{rejected[0]}' inside '{source_name}' is named like a web page but is "
+                f"not one — it looks like a text or source file. Re-export the email as "
+                f"HTML and zip that."
+            )
         return [], f"No usable email folder was found inside '{source_name}'."
 
     if len(models) == 1:
