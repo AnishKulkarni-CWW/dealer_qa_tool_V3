@@ -1,3 +1,4 @@
+import contextlib
 import re
 import html as html_escape_module
 import zipfile
@@ -2972,49 +2973,63 @@ with ext_theme.hidden(not ext_workflow_visible):
     ext_multi_assignments = {}
     _ext_job_names = [j["name"] for j in email_jobs]
 
-    if ext_master_image_auto_map:
-        with ext_theme.section(
-            "image", "Master Images — Model Routing",
-            ext_master_image_index.note,
-        ):
-            _img_rows = []
-            for _jname in _ext_job_names:
-                _entry, _reason = ext_master_image_auto_map.get(_jname, (None, ""))
-                _img_rows.append({
-                    "Adapt": _jname,
-                    "Master image": _entry.file_name if _entry else "— not matched —",
-                    "Model": _entry.model_label if _entry else "",
-                    "How it was matched": _reason,
-                })
-            if _img_rows:
-                st.dataframe(_img_rows, use_container_width=True, hide_index=True)
-            st.caption(
-                "Each adapt takes the master image whose file name names the same model. "
-                "Anything routed incorrectly can be overridden per adapt in the "
-                "Per-Adapt Masters card below, which always wins."
-            )
+    # Both routing tables are reference material — they say how each adapt
+    # found its master, which matters only when something looks wrong. They
+    # used to occupy a full card each, above the controls people actually
+    # use, so they are folded into one closed dropdown instead.
+    _ext_show_image_routing = bool(ext_master_image_auto_map)
+    _ext_show_pdf_routing = bool(
+        ext_pdf_emailer_index is not None and ext_pdf_emailer_index.entries)
+    _ext_routing_box = (
+        st.expander("Master routing — how each email found its master", expanded=False)
+        if (_ext_show_image_routing or _ext_show_pdf_routing)
+        else contextlib.nullcontext()
+    )
 
-    if ext_pdf_emailer_index is not None and ext_pdf_emailer_index.entries:
-        with ext_theme.section(
-            "routing", "Master PDF — Emailer Routing",
-            ext_pdf_emailer_index.note,
-        ):
-            _routing_rows = []
-            for _jname in _ext_job_names:
-                _entry, _reason = ext_pdf_auto_map.get(_jname, (None, ""))
-                _routing_rows.append({
-                    "Adapt": _jname,
-                    "Master emailer": _entry.model_label if _entry else "— not matched —",
-                    "PDF page": _entry.page_number if _entry else "",
-                    "How it was matched": _reason,
-                })
-            if _routing_rows:
-                st.dataframe(_routing_rows, use_container_width=True, hide_index=True)
-            st.caption(
-                "Each adapt is routed to its own model's EMAILER page in this one deck — "
-                "no separate master PDF per adapt is needed. Anything routed incorrectly "
-                "can be pinned by hand in the Per-Adapt Masters card below."
-            )
+    with _ext_routing_box:
+      if _ext_show_image_routing:
+          with ext_theme.section(
+              "image", "Master Images — Model Routing",
+              ext_master_image_index.note,
+          ):
+              _img_rows = []
+              for _jname in _ext_job_names:
+                  _entry, _reason = ext_master_image_auto_map.get(_jname, (None, ""))
+                  _img_rows.append({
+                      "Adapt": _jname,
+                      "Master image": _entry.file_name if _entry else "— not matched —",
+                      "Model": _entry.model_label if _entry else "",
+                      "How it was matched": _reason,
+                  })
+              if _img_rows:
+                  st.dataframe(_img_rows, use_container_width=True, hide_index=True)
+              st.caption(
+                  "Each adapt takes the master image whose file name names the same model. "
+                  "Anything routed incorrectly can be overridden per adapt in the "
+                  "Per-Adapt Masters card below, which always wins."
+              )
+
+      if _ext_show_pdf_routing:
+          with ext_theme.section(
+              "routing", "Master PDF — Emailer Routing",
+              ext_pdf_emailer_index.note,
+          ):
+              _routing_rows = []
+              for _jname in _ext_job_names:
+                  _entry, _reason = ext_pdf_auto_map.get(_jname, (None, ""))
+                  _routing_rows.append({
+                      "Adapt": _jname,
+                      "Master emailer": _entry.model_label if _entry else "— not matched —",
+                      "PDF page": _entry.page_number if _entry else "",
+                      "How it was matched": _reason,
+                  })
+              if _routing_rows:
+                  st.dataframe(_routing_rows, use_container_width=True, hide_index=True)
+              st.caption(
+                  "Each adapt is routed to its own model's EMAILER page in this one deck — "
+                  "no separate master PDF per adapt is needed. Anything routed incorrectly "
+                  "can be pinned by hand in the Per-Adapt Masters card below."
+              )
 
     if len(_ext_job_names) > 1 or (ext_pdf_emailer_index is not None and ext_pdf_emailer_index.entries):
         with ext_theme.section(

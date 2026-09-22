@@ -418,6 +418,24 @@ DEBRIS_LINE_MAX_CONFIDENCE = 50.0
 # separates the two cleanly where confidence and length cannot.
 DEBRIS_ALIGN_TOLERANCE_RATIO = 0.02
 
+# ...and the confidence a short line has to reach to survive NOT being
+# aligned with anything. The rule above only discards a short line that is
+# also unsure, which lets a moderately confident scrap through: measured on
+# the 2GC master creative, a "va" read out of the photograph at confidence
+# 53, three hundred pixels to the right of a headline that starts at x=121.
+# It became a line of its own, landed between the 32px headline and the
+# 16px subheadline, and font-size banding handed it the Subheadline field
+# while demoting the real subheadline to the dealer-name band. A short line
+# standing on its own, nowhere near the banner's text column, has to be
+# read really well before it is believed.
+DEBRIS_UNALIGNED_MAX_CONFIDENCE = 80.0
+
+# A word at one end of a line, separated from the rest of it by more than
+# this multiple of the line's own type size, is not part of that line.
+# Ordinary word spacing measures well under one; the scraps this removes
+# measured 9x ("...WERKE ee") and 62x ("THE7 ... Ak") on real creatives.
+DEBRIS_WORD_GAP_RATIO = 3.0
+
 
 @dataclass
 class OCRResult:
@@ -1171,6 +1189,10 @@ def _word_boxes(data: dict, source: str = "") -> List[dict]:
             "top": float(data["top"][i]),
             "height": float(data["height"][i]),
             "left": float(data["left"][i]),
+            # Width is only ever used to measure the GAP between words — see
+            # `_strip_edge_debris_words`, where a scrap read out of the
+            # photograph is told from real copy by how far it sits from it.
+            "width": float(data.get("width", [0] * n)[i] or 0),
             "conf": conf,
             "key": (source, data["block_num"][i], data["par_num"][i], data["line_num"][i]),
         })
@@ -1364,14 +1386,28 @@ def _strip_edge_debris_words(words: List[dict]) -> List[dict]:
     TO THE GOOD PART.", where "ey)" is a piece of the photograph.
 
     Deliberately narrow, and deliberately only at the ends: a word is
-    dropped only when it is short AND unsure AND contains a character that
-    does not belong in banner copy at all. Real short copy clears at least
-    one of the three — the "50%*" in a real subheadline is punctuated but
-    confident, and "THE" is short and clean. Nothing is ever removed from
-    the middle of a line, where a scrap cannot be, and a line is never
-    emptied.
+    dropped only when it is short AND unsure AND either carries a character
+    that does not belong in banner copy at all, or sits a long way from the
+    rest of the line. Real short copy clears at least one of those — the
+    "50%*" in a real subheadline is punctuated but confident, and the "7" in
+    a "THE 7" badge is short and unsure but sits right beside its own word.
+    Nothing is ever removed from the middle of a line, where a scrap cannot
+    be, and a line is never emptied.
+
+    The gap test is what catches a scrap that is merely plain: "ee" read out
+    of a photograph and glued to the end of "BAYERISCHE MOTOREN WERKE" has
+    nothing odd about its characters at all — what gives it away is sitting
+    a hundred pixels past the end of a line whose words are five apart.
     """
-    def is_scrap(word: dict) -> bool:
+    if len(words) < 2:
+        return list(words)
+    ordered = sorted(words, key=lambda w: float(w.get("left", 0)))
+    size = _core_line_height(_measurement_words(ordered) or ordered)
+
+    def right_of(word: dict) -> float:
+        return float(word.get("left", 0)) + float(word.get("width", 0) or 0)
+
+    def is_scrap(word: dict, neighbour: Optional[dict]) -> bool:
         text = word.get("text") or ""
         if len(re.sub(r"[^A-Za-z0-9]", "", text)) > DEBRIS_LINE_MAX_CHARS:
             return False
@@ -1380,12 +1416,19 @@ def _strip_edge_debris_words(words: List[dict]) -> List[dict]:
                 return False
         except (TypeError, ValueError):
             return False
-        return any((not ch.isalnum()) and ch not in _WORD_EDGE_PUNCTUATION for ch in text)
+        if any((not ch.isalnum()) and ch not in _WORD_EDGE_PUNCTUATION for ch in text):
+            return True
+        if neighbour is None or size <= 0:
+            return False
+        gap = (float(neighbour.get("left", 0)) - right_of(word)
+               if float(word.get("left", 0)) < float(neighbour.get("left", 0))
+               else float(word.get("left", 0)) - right_of(neighbour))
+        return gap > size * DEBRIS_WORD_GAP_RATIO
 
-    kept = list(words)
-    while len(kept) > 1 and is_scrap(kept[0]):
+    kept = list(ordered)
+    while len(kept) > 1 and is_scrap(kept[0], kept[1]):
         kept.pop(0)
-    while len(kept) > 1 and is_scrap(kept[-1]):
+    while len(kept) > 1 and is_scrap(kept[-1], kept[-2]):
         kept.pop()
     return kept
 
@@ -1623,6 +1666,7 @@ def _read_word_boxes(image: Image.Image) -> Tuple[List[dict], int]:
         w["top"] /= factor
         w["height"] /= factor
         w["left"] /= factor
+        w["width"] = float(w.get("width", 0)) / factor
     return big_boxes, factor
 
 
@@ -1664,11 +1708,20 @@ def _drop_debris_lines(entries, image_width: float):
 
     kept = []
     for tl, ws in entries:
-        if not _is_probable_debris_line(ws, tl.text):
+        short = _line_longest_word(ws) <= DEBRIS_LINE_MAX_CHARS
+        if not short:
             kept.append((tl, ws))
             continue
         left = min(w["left"] for w in ws)
-        if any(abs(left - ref) <= tolerance for ref in confident_lefts):
+        aligned = any(abs(left - ref) <= tolerance for ref in confident_lefts)
+        if aligned:
+            # Flush with the banner's own text column, so it is copy — this
+            # is what keeps a "THE 7" badge read at confidence 0.
+            kept.append((tl, ws))
+            continue
+        # Standing on its own, away from the column. Believed only if it was
+        # read really well — see DEBRIS_UNALIGNED_MAX_CONFIDENCE.
+        if _line_best_confidence(ws) >= DEBRIS_UNALIGNED_MAX_CONFIDENCE:
             kept.append((tl, ws))
     return kept
 
