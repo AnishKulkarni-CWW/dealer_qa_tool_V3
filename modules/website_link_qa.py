@@ -342,8 +342,8 @@ def run_website_link_qa(
             detail = (
                 f"CTA button link correctly corresponds to dealer '{dealer_name}' — the "
                 f"dealer is named in the link itself ('{cta_href}') rather than in the "
-                f"domain '{cta_domain}', which is how a dealer's page on a shared BMW "
-                f"property is linked."
+                f"domain '{cta_domain}', which is how a dealer's page on a shared "
+                f"brand website is linked."
             )
         else:
             detail = (
@@ -378,7 +378,7 @@ def run_website_link_qa(
                 f"CTA button domain ('{cta_domain}') is a different domain from the Dealer "
                 f"Panel website ('{panel_domain}'), but both belong to dealer "
                 f"'{dealer_name}' — the panel links the dealer's own site and the CTA links "
-                f"that dealer's page on another BMW property."
+                f"that dealer's page on another brand website."
             )
         else:
             detail = (

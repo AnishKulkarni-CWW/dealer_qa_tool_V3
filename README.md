@@ -1,4 +1,4 @@
-# BMW Dealer Panel QA Tool — Extended
+# Dealer Panel QA Tool — Extended
 
 ## The interface
 
@@ -12,13 +12,12 @@ There is **no sign-in and no history**. Every file you add lives in the
 browser session and is discarded when the tab closes; nothing is written
 to a server, and no run is ever stored.
 
-Three views live on the navigation rail:
+Two views live on the navigation rail:
 
 | View | What it is |
 | --- | --- |
 | **Home** | The whole workflow. |
 | **Settings** | Result table density, whether the progress rail is shown, a session reset, and the read-only QA thresholds from `modules/config.py`. |
-| **Help** | **What gets QA'd** — every check the tool runs and what makes each one pass or fail — then how to run a pass, how Master priority resolves, and the common causes when something looks wrong. |
 
 Below the menu the rail carries one switch, **Show the welcome panel**, so
 the large panel at the top of the workspace can be folded away without

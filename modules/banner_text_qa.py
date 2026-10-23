@@ -416,7 +416,7 @@ def _dealer_field_status(expected: str, matched_line_text: str, banner_ocr_text:
             )
 
     detail = (
-        f"No dealer-name line was found on this banner. On many BMW templates the dealer "
+        f"No dealer-name line was found on this banner. On many templates the dealer "
         f"block sits in the email body rather than on the banner artwork — the separate "
         f"'Dealer exists in Banner' check covers that case."
     )
@@ -665,7 +665,7 @@ def run_banner_text_qa(
     ]
 
     if match_case:
-        result.notes.append("Case-sensitive matching enabled — casing differences (e.g. \"bmw\" vs \"BMW\") count as a mismatch.")
+        result.notes.append("Case-sensitive matching enabled — casing differences (e.g. \"motors\" vs \"Motors\") count as a mismatch.")
 
     for label, expected, found_text in fields:
         if label == "Dealer Name":
