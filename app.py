@@ -50,7 +50,7 @@ from modules import model_bundle as ext_model_bundle
 # PaddleOCR isn't installed / its models aren't cached — see ocr_engine.py.
 EXT_OCR_PREFER_KEY = "paddleocr"
 from modules.results import ModuleResult as ExtModuleResult
-from modules.config import DEFAULT_CONFIG as EXT_CFG
+from modules.config import DEFAULT_CONFIG as EXT_CFG, font_label as ext_font_label
 
 
 st.set_page_config(
@@ -1449,7 +1449,7 @@ def run_style_qa(html_raw: str) -> List[StyleIssue]:
             bold_font_issue = True
             issues.append(StyleIssue(
                 f"Bold font-family: '{snippet}'", "Fail",
-                f"Bold text '{snippet}' does not declare font-family: bmwtypenextbold."
+                f"Bold text '{snippet}' does not use the {ext_font_label('bmwtypenextbold')} font."
             ))
     if not bold_font_issue:
         if bold_checked_snippets:
@@ -1458,7 +1458,7 @@ def run_style_qa(html_raw: str) -> List[StyleIssue]:
                 checked_label += f", and {len(bold_checked_snippets) - 6} more"
             issues.append(StyleIssue(
                 f"Bold font-family: {checked_label}", "Pass",
-                f"All bold (<strong>/<b>) text uses bmwtypenextbold. Checked: {checked_label}."
+                f"All bold (<strong>/<b>) text uses the {ext_font_label('bmwtypenextbold')} font. Checked: {checked_label}."
             ))
         else:
             issues.append(StyleIssue("Bold font-family", "Pass", "No bold (<strong>/<b>) text found in scope to check."))
@@ -1474,7 +1474,7 @@ def run_style_qa(html_raw: str) -> List[StyleIssue]:
                 light_font_issue = True
                 issues.append(StyleIssue(
                     f"Light font-family: '{snippet}'", "Fail",
-                    f"Light-weight text '{snippet}' does not declare font-family: bmwtypenextlight."
+                    f"Light-weight text '{snippet}' does not use the {ext_font_label('bmwtypenextlight')} font."
                 ))
     if not light_font_issue:
         if light_checked_snippets:
@@ -1483,7 +1483,7 @@ def run_style_qa(html_raw: str) -> List[StyleIssue]:
                 checked_label += f", and {len(light_checked_snippets) - 6} more"
             issues.append(StyleIssue(
                 f"Light font-family: {checked_label}", "Pass",
-                f"All light-weight (font-weight:300) text uses bmwtypenextlight. Checked: {checked_label}."
+                f"All light-weight (font-weight:300) text uses the {ext_font_label('bmwtypenextlight')} font. Checked: {checked_label}."
             ))
         else:
             issues.append(StyleIssue("Light font-family", "Pass", "No light-weight (font-weight:300) text found in scope to check."))
@@ -1513,11 +1513,11 @@ def run_style_qa(html_raw: str) -> List[StyleIssue]:
         if follow_us_font_issue:
             issues.append(StyleIssue(
                 "Follow Us font", "Warn",
-                f"'Follow Us' text found but does not declare font-family: {EXT_CFG.follow_us_expected_font}. "
+                f"'Follow Us' text found but does not use the {ext_font_label(EXT_CFG.follow_us_expected_font)} font. "
                 f"This is only a warning — not every template is required to set this."
             ))
         else:
-            issues.append(StyleIssue("Follow Us font", "Pass", f"'Follow Us' text correctly uses {EXT_CFG.follow_us_expected_font}."))
+            issues.append(StyleIssue("Follow Us font", "Pass", f"'Follow Us' text correctly uses the {ext_font_label(EXT_CFG.follow_us_expected_font)} font."))
     # If "Follow Us" text isn't present at all in this email, no row is
     # added — the check simply doesn't apply to this template.
 
@@ -2114,7 +2114,7 @@ def _cached_emailer_index(pdf_bytes: bytes):
 #
 # 2. Nothing is ever unmounted. Streamlit throws away the state of any
 #    widget it did not render on the latest run, so switching to
-#    Settings or Help would silently drop uploaded files and typed
+#    Settings would silently drop uploaded files and typed
 #    master text. The workflow is therefore ALWAYS rendered and simply
 #    hidden by CSS (ext_theme.hidden) when another view is on screen.
 # ---------------------------------------------------------------
@@ -2127,7 +2127,6 @@ ext_view = ext_theme.render_sidebar(
     nav_items=[
         ("home", "Home"),
         ("settings", "Settings"),
-        ("help", "Help"),
     ],
     key="dq_nav",
 )
@@ -2215,326 +2214,12 @@ if ext_view == "settings":
                 _val = getattr(EXT_CFG, _name)
                 if callable(_val):
                     continue
-                _cfg_rows.append({"Setting": _name, "Value": str(_val)})
+                _cfg_rows.append({"Setting": _name, "Value": str(ext_font_label(_val) if isinstance(_val, str) else _val)})
             if _cfg_rows:
                 st.dataframe(_cfg_rows, use_container_width=True, hide_index=True,
                              height=260)
             else:
                 st.caption("No tunable thresholds are exposed by this build.")
-
-
-# =========================================================
-# Help view
-# =========================================================
-if ext_view == "help":
-    ext_theme.section_title("Help", "How the tool works, end to end", "help")
-
-    # ---- What the tool actually checks ------------------------------
-    # First thing on the page on purpose: the question people ask before
-    # they upload anything is "what will this catch?", and until now the
-    # only answer was to run it and read the output.
-    ext_theme.section_title(
-        "What gets QA'd",
-        "Every check the tool runs, and what makes each one pass or fail",
-        "check-square",
-    )
-
-    _qa_always, _qa_advanced = st.columns(2, gap="large")
-
-    with _qa_always:
-        with ext_theme.section(
-            "content", "Always runs",
-            "These four run on every email, with no setup beyond the two uploads",
-        ):
-            st.markdown(
-                """
-                <div class="dq-help-h">1 · Content QA — is the dealer panel there?</div>
-                <p class="dq-help-p">Each line of the dealer's panel text from the
-                Excel sheet is looked for in the email. Matching is fuzzy, so
-                harmless rendering differences don't fail a correct email. Checked
-                line by line:</p>
-                <ul class="dq-help-ul">
-                  <li><b>Dealer name</b> — the "BMW &lt;Dealer&gt;" heading.</li>
-                  <li><b>Every branch/city name</b> and its address block, including
-                      the extra branch columns to the right of "Dealer Panels".</li>
-                  <li><b>Telephone line</b> and <b>Website line</b>.</li>
-                </ul>
-                <p class="dq-help-p"><b>Pass</b> = the line was found ·
-                <b>Missing</b> = it is not in the email.</p>
-
-                <div class="dq-help-h">2 · Dealer Panel Exact Match QA — is it there
-                <i>exactly</i>?</div>
-                <p class="dq-help-p">The same lines again, this time character for
-                character. Catches what fuzzy matching deliberately forgives:</p>
-                <ul class="dq-help-ul">
-                  <li><b>Capitalisation and spacing</b>, down to a single extra space.</li>
-                  <li><b>Phone and landline format</b> — country code, grouping and
-                      separators against the expected pattern for that number.</li>
-                  <li><b>The <code>tel:</code> link target</b> matching the number
-                      printed beside it, so tapping it dials what it says.</li>
-                </ul>
-
-                <div class="dq-help-h">3 · Styling QA — does it look right?</div>
-                <ul class="dq-help-ul">
-                  <li><b>Font family, size, colour and line height</b> on the dealer
-                      panel and the module directly above it.</li>
-                  <li><b>Bold rules</b> — the dealer name and every branch/city name
-                      must render bold; body lines must not.</li>
-                  <li><b>Double spaces</b> anywhere in the copy.</li>
-                  <li><b>Punctuation spacing</b> — a space before a comma or full
-                      stop, a missing space after one.</li>
-                  <li><b>Spacing against the Excel line</b> — a stray or missing space
-                      bar. Reported as a <b>warning</b>, not a failure: it is a
-                      typographic defect, and failing it buried genuinely wrong copy.
-                      Wrong words or wrong casing are still failures.</li>
-                  <li><b>Image weight</b> — any image over 300&nbsp;KB, when the
-                      images are supplied (model .zip, or an images .zip).</li>
-                </ul>
-
-                <div class="dq-help-h">4 · Website &amp; CTA link QA</div>
-                <ul class="dq-help-ul">
-                  <li>The panel's own <b>"Website:" line</b> belongs to this dealer.</li>
-                  <li>The <b>CTA button's <code>href</code></b> belongs to the same
-                      dealer.</li>
-                  <li>The two <b>agree with each other</b>.</li>
-                </ul>
-                <p class="dq-help-p">A link is the dealer's if their name is in it,
-                wherever in it that is — all three of these pass:</p>
-                <ul class="dq-help-ul">
-                  <li>in the domain — <code>bmw-birdautomotive.in</code></li>
-                  <li>in a branch domain —
-                      <code>bmw-deutschemotoren-bengaluru.in</code>, the same dealer as
-                      <code>bmw-deutschemotoren.in</code></li>
-                  <li>in the link's path —
-                      <code>bmwusedcars.in/bavaria-motors</code>, the dealer's page on a
-                      shared BMW property</li>
-                </ul>
-                <p class="dq-help-p">A deep link to a model page still passes, and the
-                CTA and the panel agree when they share a domain, when one is a branch
-                of the other, or when both carry this dealer's name.</p>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    with _qa_advanced:
-        with ext_theme.section(
-            "advanced", "Advanced QA — opt in",
-            "Switch on 'Enable Advanced QA' and supply a Master reference",
-        ):
-            st.markdown(
-                """
-                <p class="dq-help-p">These compare the email against an approved
-                <b>Master</b> — a Master JPG, a Master PDF bulletin, a Master HTML
-                zip, or text you type in. Without a Master there is nothing to
-                compare against and each check reports that rather than guessing.</p>
-                <p class="dq-help-p"><b>One master per model, without a bulletin PDF.</b>
-                Upload the master images together and each is routed to the model named
-                in its own file name — <code>..._Sep26 X3.png</code> goes to the X3 —
-                exactly as a bulletin's pages are routed. A campaign zip that carries
-                its own creative beside each index.html is picked up the same way; an
-                image you uploaded wins where both name the same model.</p>
-
-                <div class="dq-help-h">5 · Banner Text QA</div>
-                <p class="dq-help-p">The banner is pixels, so its words are read by
-                OCR and compared with the Master's, word by word:</p>
-                <ul class="dq-help-ul">
-                  <li><b>Headline</b> — every word present, in order, spelled and
-                      spaced the same. Missing and extra words are both named.</li>
-                  <li><b>Subheadline</b> — the same treatment.</li>
-                  <li><b>Dealer name on the banner</b>, when "Dealer exists in
-                      Banner" is ticked.</li>
-                </ul>
-                <p class="dq-help-p">Where the headline sits on the banner differs
-                between creative guidelines — at the head on the current one, in a
-                band at the foot on the previous one. Both are read automatically;
-                <b>Banner layout</b> in Validation Options forces one if a banner is
-                read wrongly.</p>
-                <p class="dq-help-p">Every banner is read three ways — as supplied,
-                as white ink (for type over a pale sky) and as local ink (for type
-                over something brighter than itself) — and the best reading of each
-                LINE is kept. Both sides of this check are OCR, the Master's and this
-                email's, so when a difference is plainly the same word read badly —
-                <code>FECT</code> for <code>PERFECT</code>, <code>CET</code> for
-                <code>GET</code>, or a casing difference — it is shown as a
-                readability <b>warning</b> naming both spellings rather than a
-                failure. Model codes are never treated that way: <code>X5</code>
-                against <code>X7</code> is always a failure.</p>
-
-                <div class="dq-help-h">6 · Body QA</div>
-                <ul class="dq-help-ul">
-                  <li><b>Dealer name in the body copy</b>, when "Dealer exists in
-                      Body" is ticked. Only the greeting and body copy are searched,
-                      never the dealer panel — that is already checked above.</li>
-                  <li><b>As Is / To Be comparison</b> — type both and the live body
-                      is diffed against them, with added, removed and changed
-                      wording called out.</li>
-                </ul>
-
-                <div class="dq-help-h">7 · Summary</div>
-                <p class="dq-help-p">One row per Advanced QA module with its verdict
-                and counts, so a run can be read at module level first.</p>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    with ext_theme.section(
-        "report", "What you get out",
-        "On screen and in the workbook",
-    ):
-        _out_a, _out_b = st.columns(2, gap="large")
-        with _out_a:
-            st.markdown(
-                """
-                <p class="dq-help-p"><b>On screen</b>, per email: a KPI row (total,
-                passed, failed, warnings with percentages) above each section, and a
-                tabbed table — <b>Issues</b>, <b>Warnings</b>, <b>Passed</b>,
-                <b>All records</b>. The failure and warning counts sit above the
-                tabs and stay visible whichever tab is open, so nothing that needs
-                attention can hide behind a tab you have not clicked.</p>
-                """,
-                unsafe_allow_html=True,
-            )
-        with _out_b:
-            st.markdown(
-                """
-                <p class="dq-help-p"><b>In the Excel report</b>: an
-                <b>Overview</b> sheet with one row per email, then <b>one sheet per
-                email</b> carrying its whole report top to bottom — summary, Content
-                QA, Styling QA, Advanced QA. One tab per model, however many models
-                you upload.</p>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    ext_theme.section_title(
-        "Using the tool",
-        "Running a pass, master priority, and what to do when something looks wrong",
-        "help",
-    )
-
-    _help_a, _help_b = st.columns([1.25, 1], gap="large")
-
-    with _help_a:
-        with ext_theme.section("help", "Running a QA pass",
-                               "Five steps, start to finish"):
-            st.markdown(
-                """
-                <ol class="dq-help-ol">
-                  <li><b>Upload the dealer master sheet.</b> The workbook's
-                      <i>Mailers&nbsp;-&nbsp;NSC&nbsp;</i> sheet is read
-                      automatically — columns <b>Dealer</b>, <b>Region</b>,
-                      <b>Dealer Panels</b>, plus every additional branch column
-                      to the right of it. Pick a different sheet by hand from
-                      <b>Excel sheet</b> if the workbook is laid out unusually.</li>
-                  <li><b>Upload the email(s) to check.</b> Either the raw
-                      <b>HTML file(s)</b>, or a <b>model folder .zip</b>
-                      (index.html + images/). The zip route is the better one:
-                      it also enables the 300&nbsp;KB image-size check and lets
-                      Banner QA read the banner's actual pixels. One zip holding a
-                      folder per model works too — the tool walks into it however
-                      deeply the folders are nested and QAs each model separately.</li>
-                  <li><b>Set the options.</b> Choosing a dealer makes that
-                      dealer authoritative for the whole run; leaving it on
-                      automatic detects each email's dealer from its own HTML.</li>
-                  <li><b>Add a Master reference</b> (optional) if you want
-                      Banner / Body / OCR checks — a Master JPG, a Master PDF
-                      bulletin, a Master HTML zip, or typed Manual Text.</li>
-                  <li><b>Run QA Validation</b> and read the results, then
-                      download the consolidated Excel report.</li>
-                </ol>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        with ext_theme.section("exact", "What every check does",
-                               "The full rule list"):
-            st.markdown(
-                """
-                <p class="dq-help-p"><b>Content QA</b> — every line of the
-                dealer's panel text from Excel must appear in the email, found
-                by fuzzy line matching so small rendering differences don't
-                produce false failures.</p>
-                <p class="dq-help-p"><b>Dealer Panel Exact Match QA</b> —
-                the same lines re-checked character for character: case,
-                spacing, phone and landline number formatting, and the
-                <code>tel:</code> link target matching the number shown.</p>
-                <p class="dq-help-p"><b>Styling QA</b> — font family, size,
-                colour and line-height rules on the dealer panel, plus double
-                spaces, punctuation spacing, the lines that must render bold
-                (dealer name and every branch/city name), and image weight.</p>
-                <p class="dq-help-p"><b>Website / CTA link QA</b> — the panel's
-                own "Website:" line and the CTA button's <code>href</code> must
-                both belong to the dealer's domain, and must agree with each
-                other. Matched by domain, so a deep link to a model page still
-                passes.</p>
-                <p class="dq-help-p"><b>Advanced QA</b> (opt-in) — Body QA
-                (dealer name in the greeting copy, As&nbsp;Is / To&nbsp;Be
-                comparison) and Banner QA (Headline, Subheadline and Dealer
-                Name read off the banner by OCR and compared with the Master).</p>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    with _help_b:
-        with ext_theme.section("advanced", "Master priority",
-                               "Which reference wins"):
-            st.markdown(
-                """
-                <p class="dq-help-p">Expected Headline, Subheadline, Dealer
-                Name and Body Text are resolved <b>per field</b>, in this
-                order:</p>
-                <ol class="dq-help-ol">
-                  <li><b>Manual Text</b> — any field you typed always wins for
-                      that field.</li>
-                  <li><b>Master JPG</b></li>
-                  <li><b>Master PDF</b></li>
-                  <li><b>Master HTML ZIP</b></li>
-                  <li><b>Dealer dropdown</b> (dealer name only)</li>
-                  <li><b>Excel sheet</b></li>
-                </ol>
-                <p class="dq-help-p">A field left blank falls through to the
-                next source that can supply it. Sources are never merged.</p>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        with ext_theme.section("multi", "Several emails at once",
-                               "Per-adapt masters"):
-            st.markdown(
-                """
-                <p class="dq-help-p">Upload as many emails as you like; each is
-                QA'd in the same run. When more than one is uploaded, a
-                <b>Per-Adapt Masters</b> card appears so every email can be
-                given its own Master JPG / HTML zip / manual text. Any slot left
-                empty falls back to the global Master controls.</p>
-                <p class="dq-help-p">A sales-push bulletin PDF is the exception
-                and is uploaded <b>once</b>: it already contains every model's
-                emailer page, so each email is routed to its own page
-                automatically. Anything routed wrongly can be pinned by hand.</p>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        with ext_theme.section("style", "If something looks wrong",
-                               "Common causes"):
-            st.markdown(
-                """
-                <p class="dq-help-p"><b>"Could not match this email to a
-                dealer"</b> — the email's <code>BMW &lt;Dealer&gt;</code>
-                heading doesn't match any Dealer cell in the sheet. Pick the
-                dealer by hand in Validation options.</p>
-                <p class="dq-help-p"><b>Banner QA is empty</b> — the email was
-                uploaded as bare HTML with no images. Upload it as a model
-                folder .zip, or add the images .zip alongside.</p>
-                <p class="dq-help-p"><b>Headline / Subheadline blank</b> — no
-                OCR engine is installed, or no Master was supplied. The banner
-                on screen shows which.</p>
-                <p class="dq-help-p"><b>Everything fails at once</b> — usually a
-                dealer mismatch: the selected dealer isn't the dealer the email
-                was built for. The run says so in red above the tables.</p>
-                """,
-                unsafe_allow_html=True,
-            )
 
 
 # =========================================================

@@ -159,7 +159,6 @@ KINDS = {
     "pdf":      ("#BE185D", "#FCE9F1", "pdf"),
     "zip":      ("#A16207", "#FCF3DD", "archive"),
     "text":     ("#0E7490", "#E4F5F9", "type"),
-    "help":     (BRAND, BRAND_TINT, "help"),
     "settings": ("#475569", "#EEF2F7", "settings"),
 }
 
@@ -188,7 +187,7 @@ def kind_accent(name: str) -> str:
 # One entry per nav row, in the order render_sidebar is called with.
 # "QA Validation" was removed: it rendered the identical workflow to Home
 # minus the welcome panel, so it was a second door into the same room.
-_NAV_ICONS = ["home", "settings", "help"]
+_NAV_ICONS = ["home", "settings"]
 
 
 def _nav_icon_rules() -> str:
@@ -1210,28 +1209,6 @@ details.oq-details > summary:hover {{ background:{CANVAS}; color:{BRAND_DARK}; }
 }}
 .dq-kv-item b {{ color:{INK}; font-weight:700; }}
 
-.dq-help-h {{ font-size:.95rem; font-weight:750; color:{INK}; margin:.2rem 0 .35rem 0; }}
-.dq-help-p {{ font-size:.845rem; color:{INK_SOFT}; line-height:1.7; margin:0 0 .55rem 0; }}
-.dq-help-ol, .dq-help-ul {{ margin:.1rem 0 .6rem 1.1rem; padding:0; }}
-.dq-help-ol li, .dq-help-ul li {{
-    font-size:.845rem; color:{INK_SOFT}; line-height:1.7; margin-bottom:.25rem;
-}}
-.dq-help-ol li b, .dq-help-ul li b {{ color:{INK}; }}
-.dq-help-ul {{ list-style:none; margin-left:0; }}
-.dq-help-ul li {{ position:relative; padding-left:1.15rem; }}
-.dq-help-ul li::before {{
-    content:""; position:absolute; left:.15rem; top:.62em;
-    width:5px; height:5px; border-radius:50%; background:{BRAND};
-}}
-/* The help pages are read, not scanned — a heading inside a card needs a
-   little air above it so its own paragraphs stay attached to it. */
-.dq-help-h {{ margin-top:1.15rem; }}
-.dq-help-h:first-child {{ margin-top:.2rem; }}
-.dq-help-p code, .dq-help-ul code {{
-    background:{CANVAS}; border:1px solid {LINE}; border-radius:5px;
-    padding:.05rem .3rem; font-size:.8em;
-}}
-
 /* hidden view holder — keeps every widget mounted (and therefore keeps
    uploaded files and typed text alive) while another nav view is on
    screen. Display:none is deliberate: unmounting the widgets is what
@@ -1678,7 +1655,7 @@ def group(label: str = ""):
 def hidden(is_hidden: bool = True):
     """Renders its body but hides it from view when `is_hidden`.
 
-    Used by the navigation: switching to Settings or Help must NOT unmount
+    Used by the navigation: switching to Settings must NOT unmount
     the workflow's widgets, because Streamlit drops the state of any
     widget it did not render — which would silently throw away uploaded
     files and typed master text the moment somebody looked at another

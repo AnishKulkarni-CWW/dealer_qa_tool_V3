@@ -90,3 +90,20 @@ class QAConfig:
 
 
 DEFAULT_CONFIG = QAConfig()
+
+
+# ---- How the email typefaces are named on screen ----
+# The style checks look for the real font-family identifiers the emails
+# declare (above, and in app.py's bold/light rules). Results only ever show
+# these neutral names, so no brand name appears anywhere in the tool's own
+# text. A value not listed here is shown as-is.
+FONT_DISPLAY_NAMES = {
+    "bmwtypenextbold": "TypeNext Bold",
+    "bmwtypenextlight": "TypeNext Light",
+    "bmwtypenextregular": "TypeNext Regular",
+}
+
+
+def font_label(family: str) -> str:
+    """The on-screen name for a font-family identifier."""
+    return FONT_DISPLAY_NAMES.get(str(family).strip().lower(), family)
