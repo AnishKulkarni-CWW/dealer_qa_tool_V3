@@ -187,6 +187,14 @@ def _write_table(
     return r + 1
 
 
+def _attention_first(rows: List[list], status_index: int) -> List[list]:
+    """Fail rows first, then Warn, then Pass — the same order the tool's
+    'All records' tables use. Stable, so each group keeps its own order; a
+    status that is neither sorts with the failures."""
+    order = {"pass": 2, "present": 2, "warn": 1, "warning": 1}
+    return sorted(rows, key=lambda r: order.get(str(r[status_index]).strip().lower(), 0))
+
+
 def _counts_from_status_series(statuses: List[str]) -> Dict[str, int]:
     counts = {"Pass": 0, "Fail": 0, "Warn": 0}
     for s in statuses:
@@ -362,7 +370,7 @@ def _build_model_sheet(wb: Workbook, job: JobReportData, sheet_name: str) -> Non
         for _, r in content_df.iterrows()
     ] if len(content_df) else []
     if content_rows:
-        row = _write_table(ws, row, ["Item", "Status", "Detail"], content_rows,
+        row = _write_table(ws, row, ["Item", "Status", "Detail"], _attention_first(content_rows, 1),
                            status_col_indexes=[2], col_widths=SHEET_COL_WIDTHS, freeze=False)
     else:
         row = _write_empty_note(ws, row, "No content checks were produced for this email.")
@@ -378,7 +386,7 @@ def _build_model_sheet(wb: Workbook, job: JobReportData, sheet_name: str) -> Non
         for _, r in style_df.iterrows()
     ] if len(style_df) else []
     if style_rows:
-        row = _write_table(ws, row, ["Rule", "Severity", "Detail"], style_rows,
+        row = _write_table(ws, row, ["Rule", "Severity", "Detail"], _attention_first(style_rows, 1),
                            status_col_indexes=[2], col_widths=SHEET_COL_WIDTHS, freeze=False)
     else:
         row = _write_empty_note(ws, row, "No styling checks were produced for this email.")
@@ -400,7 +408,7 @@ def _build_model_sheet(wb: Workbook, job: JobReportData, sheet_name: str) -> Non
     for mr in module_results:
         p, f, w = mr.counts()
         module_rows.append([mr.module_name, mr.overall_status(), f"Passed {p} · Warnings {w} · Failed {f}"])
-    row = _write_table(ws, row, ["Module", "Status", "Counts"], module_rows,
+    row = _write_table(ws, row, ["Module", "Status", "Counts"], _attention_first(module_rows, 1),
                        status_col_indexes=[2], col_widths=SHEET_COL_WIDTHS, freeze=False)
     row += 1
 
@@ -422,7 +430,7 @@ def _build_model_sheet(wb: Workbook, job: JobReportData, sheet_name: str) -> Non
     if detail_rows:
         ws.cell(row=row, column=1, value="Detailed checks").font = SECTION_FONT
         row += 1
-        _write_table(ws, row, ["Check", "Status", "Detail"], detail_rows,
+        _write_table(ws, row, ["Check", "Status", "Detail"], _attention_first(detail_rows, 1),
                      status_col_indexes=[2], col_widths=SHEET_COL_WIDTHS, freeze=False)
     else:
         _write_empty_note(

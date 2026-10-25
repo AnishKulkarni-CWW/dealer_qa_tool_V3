@@ -187,7 +187,8 @@ streamlit run app.py
 
 15. **One table per section** — every QA section renders as KPI tiles
     (total / passed / failed / warnings) above one complete "All records"
-    table, each row coloured Pass / Warn / Fail. Advanced QA adds its own
+    table, each row coloured Pass / Warn / Fail and ordered Fail first,
+    then Warn, then Pass (the Excel report uses the same order). Advanced QA adds its own
     Body QA / Banner QA / Summary tabs. Content QA holds ONE row per line
     of the dealer's panel — found and exactly as the sheet has it (Pass),
     spacing-only differences (Warn), missing or differently worded
