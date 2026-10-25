@@ -65,9 +65,9 @@ def load_selected_sheet_with_header(
     header_row_idx = find_header_row(raw, required_columns_lower)
     if header_row_idx is None:
         raise ValueError(
-            f"Could not find a header row containing {required_columns_lower} "
-            f"in sheet '{sheet_name}'. This sheet may not be the right one — "
-            f"pick a different sheet from the dropdown."
+            f"Sheet '{sheet_name}' has no heading row with "
+            + " and ".join(f"'{c.title()}'" for c in required_columns_lower)
+            + " columns — pick a different sheet from the dropdown."
         )
     df = workbook.load_sheet(sheet_name, header=header_row_idx)
     df.columns = [str(c).strip() for c in df.columns]

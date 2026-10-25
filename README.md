@@ -17,7 +17,7 @@ Two views live on the navigation rail:
 | View | What it is |
 | --- | --- |
 | **Home** | The whole workflow. |
-| **Settings** | Result table density, whether the progress rail is shown, a session reset, and the read-only QA thresholds from `modules/config.py`. |
+| **Settings** | Result table density, whether the progress rail is shown, and a session reset. |
 
 Below the menu the rail carries one switch, **Show the welcome panel**, so
 the large panel at the top of the workspace can be folded away without
@@ -181,15 +181,18 @@ streamlit run app.py
     naming both spellings instead of failing the field. The rules are
     narrow by design: short tokens stay out of it entirely, so `X5` and
     `X7`, or `2G` and `2GC`, are always compared character for character
-    and always fail. Anything left unexplained fails exactly as before.
+    and always fail. Any other word that differs from the master fails —
+    a headline that is right except for one changed word is the wrong
+    headline.
 
-15. **Tabbed results** — every QA section renders as KPI tiles (total /
-    passed / failed / warnings) above a tabbed record table: Issues /
-    Warnings / Passed / All records, plus an Expand button that opens the
-    complete table in a popup. Advanced QA adds its own Body QA / Banner
-    QA / Summary tabs. The failure and warning counts sit above the tabs
-    and stay on screen whichever tab is open, so nothing that needs
-    attention can hide behind a tab you have not clicked.
+15. **One table per section** — every QA section renders as KPI tiles
+    (total / passed / failed / warnings) above one complete "All records"
+    table, each row coloured Pass / Warn / Fail. Advanced QA adds its own
+    Body QA / Banner QA / Summary tabs. Content QA holds ONE row per line
+    of the dealer's panel — found and exactly as the sheet has it (Pass),
+    spacing-only differences (Warn), missing or differently worded
+    (Fail) — with each phone line followed by its phone-format and
+    tel: link rows.
 16. **Dealer Website Link QA (V6)** — verifies the CTA button's `href`
     AND the Dealer Panel's own "Website: ..." line both belong to the
     correct dealer's domain (derived from the dealer's own name, since
@@ -202,7 +205,10 @@ streamlit run app.py
     passes against a panel website of `www.bmw-birdautomotive.in`. Three
     rows are added directly below the existing "Website: ..." row in the
     Content QA table: Dealer Panel Website vs dealer name, CTA Button
-    Link vs dealer name, and CTA Button Link vs Dealer Panel Website.
+    Link vs dealer name, and CTA Button Link vs Dealer Panel Website —
+    plus where the panel's own Website and Email links actually go (they
+    must point to the website and address in the sheet). A CTA linked to
+    a placeholder such as `#` fails.
     A link counts as the dealer's when their name appears anywhere in it —
     in the domain, in a branch domain (`bmw-deutschemotoren-bengaluru.in`
     is the same dealer as `bmw-deutschemotoren.in`), or in the link's path
@@ -212,8 +218,7 @@ streamlit run app.py
 
 To use the Advanced QA tabs, switch on **"Enable Advanced QA (Body /
 Banner / OCR)"** in the **Validation Options** card. Left off, the run
-covers Content QA, Dealer Panel Exact Match QA, Styling QA and the
-Website/CTA link checks exactly as before.
+covers Content QA, Styling QA and the Website/CTA link checks.
 
 ## Architecture
 

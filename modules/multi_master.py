@@ -254,7 +254,7 @@ def render_panel(
     st.caption(
         f"{len(job_names)} adapt(s) uploaded. Every adapt below keeps its own Master and is "
         "checked against it in the same run — you do not have to open them one at a time. "
-        "Any slot left empty falls back to the global Master controls above."
+        "Any slot left empty uses the Masters set in the cards above."
     )
 
     for job_name in job_names:
@@ -280,7 +280,7 @@ def render_panel(
                            f"{'' if a.pdf_page_source == 'auto' else ' (pinned)'}")
         rows.append({
             "Adapt": name,
-            "Master assigned": ", ".join(bits) if bits else "— falls back to the global Master —",
+            "Master assigned": ", ".join(bits) if bits else "— uses the Masters above —",
         })
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
@@ -315,7 +315,7 @@ def _render_one(assignment, skey, job_name, pdf_index, pdf_auto_map):
             assignment.pdf_page = auto_entry.page_number if auto_entry else 0
             assignment.pdf_page_source = "auto"
             if auto_entry:
-                st.success(f"Auto-routed to **{auto_entry.model_label}** (page {auto_entry.page_number}).")
+                st.success(f"Matched to **{auto_entry.model_label}** — PDF page {auto_entry.page_number}.")
             elif auto_reason:
                 st.warning(auto_reason)
         else:

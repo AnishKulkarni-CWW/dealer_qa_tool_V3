@@ -181,27 +181,49 @@ def build_dealer_rows_from_df(df: pd.DataFrame, sheet_name: str = "") -> List[De
 
     missing = [k for k in ("dealer", "panels") if k not in col_map]
     if missing:
+        _names = {"dealer": "Dealer", "panels": "Dealer Panels"}
         raise ValueError(
-            f"Sheet '{sheet_name}' is missing expected column(s): {missing}. "
-            f"Found columns: {list(df.columns)}"
+            f"Sheet '{sheet_name}' has no "
+            + " or ".join(f"'{_names[m]}'" for m in missing)
+            + " column — pick the sheet that holds the dealer panels."
         )
 
-    # Every column after the "Dealer Panels" column is an additional
-    # branch/location panel block for the same dealer.
-    extra_panel_columns = list(df.columns[panels_col_position + 1:])
+    # The columns after "Dealer Panels" that sit under its (merged) header
+    # are the dealer's other branch/location blocks. pandas reads those as
+    # "Unnamed: N". A column with a heading of its own is a different field
+    # — the mastersheet's "Print Ad - NSC" tab ends in "Single number for
+    # GKL" — and reading it as a branch put a stray phone number into the
+    # panel as if it were an address line.
+    def _is_branch_column(col) -> bool:
+        name = str(col).strip().lower()
+        return (not name or name == "nan" or name.startswith("unnamed")
+                or any(w in name for w in ("panel", "branch", "location", "address")))
+
+    extra_panel_columns = [c for c in df.columns[panels_col_position + 1:] if _is_branch_column(c)]
+
+    def _clean_cell(value) -> str:
+        """A panel cell as the email should show it: every line trimmed,
+        blank lines dropped, and any run of spaces inside a line read as
+        one. Sheets pad cells — trailing spaces, a leading blank line, or a
+        long run of spaces used to push text onto the next visual row
+        ("Sunpharma Road,<100 spaces>Pramukh Swamy Nagar,") — and none of
+        that is text the email is meant to reproduce."""
+        text = str(value or "")
+        if text.strip().lower() == "nan":
+            return ""
+        lines = [re.sub(r"[ \t\u00a0]+", " ", ln).strip() for ln in text.splitlines()]
+        return "\n".join(ln for ln in lines if ln)
 
     rows: List[DealerRow] = []
     for _, r in df.iterrows():
         dealer = str(r.get(col_map.get("dealer", ""), "") or "").strip()
         region = str(r.get(col_map.get("region", ""), "") or "").strip()
-        panels = str(r.get(col_map.get("panels", ""), "") or "").strip()
-        if panels.lower() == "nan":
-            panels = ""
+        panels = _clean_cell(r.get(col_map.get("panels", ""), ""))
 
         extra_blocks = []
         for extra_col in extra_panel_columns:
-            extra_val = str(r.get(extra_col, "") or "").strip()
-            if extra_val and extra_val.lower() != "nan":
+            extra_val = _clean_cell(r.get(extra_col, ""))
+            if extra_val:
                 extra_blocks.append(extra_val)
 
         combined_panel_text = "\n".join([b for b in [panels] + extra_blocks if b])
@@ -246,7 +268,8 @@ def read_dealer_panels_from_excel(uploaded_file) -> Tuple[List[DealerRow], str]:
     sheet_name = find_mailers_sheet(xl)
     if sheet_name is None:
         raise ValueError(
-            f"Could not find a 'Mailers - NSC ' sheet. Sheets found: {', '.join(xl.sheet_names)}"
+            f"This file has no 'Mailers - NSC' sheet (it has: {', '.join(xl.sheet_names)}). "
+            f"Pick the sheet that holds the dealer panels in 'Excel sheet' below."
         )
 
     raw = xl.parse(sheet_name, header=None, dtype=str)
@@ -260,7 +283,7 @@ def read_dealer_panels_from_excel(uploaded_file) -> Tuple[List[DealerRow], str]:
 
     if header_row_idx is None:
         raise ValueError(
-            f"Could not find a header row containing 'Dealer' and 'Region' in sheet '{sheet_name}'."
+            f"Sheet '{sheet_name}' has no heading row with 'Dealer' and 'Region' columns."
         )
 
     df = xl.parse(sheet_name, header=header_row_idx, dtype=str)
@@ -409,11 +432,18 @@ def extract_body_greeting_slice(full_body_text: str, dealer_name: str) -> str:
         # after the greeting — that marks the dealer-panel sign-off line.
         dealer_pattern = re.escape(dealer_name.strip())
         dealer_pattern = dealer_pattern.replace(r"\ ", r"\s+")
-        bmw_dealer_match = re.search(
+        matches = list(re.finditer(
             rf"\bBMW\s+{dealer_pattern}\b", text[start:], flags=re.IGNORECASE
-        )
-        if bmw_dealer_match:
-            end = start + bmw_dealer_match.start()
+        ))
+        if matches:
+            # Body copy may name the dealer too ("visit BMW KUN Exclusive"),
+            # so the FIRST mention is not necessarily the panel. The panel
+            # heading is the last mention before the panel's own Tel. /
+            # Website lines.
+            label = re.search(r"\b(?:Tel\.?|Website|Email)\s*:", text[start:], flags=re.IGNORECASE)
+            before_panel = [m for m in matches if label is None or m.start() < label.start()]
+            heading = (before_panel or matches)[-1]
+            end = start + heading.start()
 
     return text[start:end].strip()
 
@@ -460,10 +490,11 @@ def _is_number_bearing_line(text: str) -> bool:
       - an international "+" prefix immediately before digits
       - an STD landline shape (2-5 digits, hyphen, 6-8 digits), which is
         one of the three formats config.py already recognises
-      - or at least 10 digits, the length of a full Indian subscriber
-        number (mobile, 1800 toll-free, or STD code + landline)
-    A 6-digit PIN code on its own meets none of these, so address lines
-    now take the ordinary prose path like every other address line.
+      - or a line that is nothing but a number (no letters at all)
+    A PIN code on its own meets none of these, and neither does an address
+    that simply holds a lot of numbers: "222, 220A Whitefield Main Road,
+    ... India - 560048." carries 12 digits, and an old "10 or more digits"
+    rule turned exactly that kind of address into a phone number.
     """
     raw = text or ""
     digits = _digit_sequence(raw)
@@ -475,7 +506,7 @@ def _is_number_bearing_line(text: str) -> bool:
         return True
     if _STD_LANDLINE_SHAPE_RE.search(raw):
         return True
-    return len(digits) >= 10
+    return not re.search(r"[A-Za-z]", raw) and len(digits) >= 8
 
 
 _DOMAIN_OR_EMAIL_RE = re.compile(
@@ -863,34 +894,81 @@ def diff_exact_spacing(expected: str, found: str) -> str:
     return describe_exact_mismatch(expected, found)[0]
 
 
+# A phone label written as a word of its own — "Tel.:", "Tel:", "Telephone",
+# "Ph.", "Mobile.:", "Mob:", "Toll-free:", "Fax:". It must END at a word
+# boundary: "Tel" at the start of "Telangana" is not a label, and treating
+# it as one turned a Hyderabad address into a phone line.
+_PHONE_FIELD_LABEL_RE = re.compile(
+    r"(?<![A-Za-z])(?:tel(?:ephone)?|phone|ph|mob(?:ile)?|toll[\s\-]*free|landline|fax)\b\.?\s*:?",
+    re.IGNORECASE,
+)
+
+
+def _phone_parts(line: str) -> Optional[Tuple[str, List[str]]]:
+    """(label, numbers) for a phone line; None for anything else.
+
+    A phone line is one that carries a phone label (see
+    _PHONE_FIELD_LABEL_RE), or one that is nothing but a number. An
+    address that merely holds house numbers and a PIN code is NOT one:
+    "222, 220A Whitefield Main Road, ... India - 560048." and "5th Main
+    Rd, 4' Block, Jayanagar, ... - 560011." used to be read as landline
+    numbers purely because of how many digits they contain.
+
+    `label` is the label exactly as written ("Tel.:", "Mobile.:"), or ""
+    for a bare number. When the label sits after an address on the same
+    line, only the part from the label onward is the phone. Several
+    numbers after one label ("Tel.: +91 82422 75777, +91 82422 75999")
+    come back as separate numbers.
+    """
+    text = (line or "").strip()
+    m = _PHONE_FIELD_LABEL_RE.search(text)
+    if m:
+        value = text[m.end():]
+        numbers = [n.strip() for n in re.split(r",|;|/|\bor\b", value)
+                   if len(_digit_sequence(n)) >= 6]
+        return (m.group(0).strip(), numbers) if numbers else None
+    if text and not re.search(r"[A-Za-z]", text) and len(_digit_sequence(text)) >= 8:
+        return "", [text]
+    return None
+
+
+def _number_kind(number: str, labelled: bool) -> Optional[str]:
+    digits = _digit_sequence(number)
+    if labelled and digits.startswith("91") and len(digits) == 12:
+        return "mobile_intl"
+    if labelled and digits.startswith("1800") and len(digits) == 11:
+        return "tollfree"
+    if not labelled and 8 <= len(digits) <= 13:
+        return "std_landline"
+    # A labelled number that is neither +91 mobile nor 1800 toll-free is
+    # still a phone line, just not one of the accepted shapes — reported
+    # as a Warn rather than skipped, so it is never invisible.
+    return "unclassified" if labelled else None
+
+
 def classify_expected_phone_format(excel_line: str, config) -> Optional[str]:
     """
     Determines which of the three accepted phone formats applies to this
     line, based on the digit shape of the NUMBER ITSELF as given in the
     Excel cell (Excel is the source of truth for what the number is — the
     format is then a rendering rule on top of that). Returns one of
-    "mobile_intl" / "tollfree" / "std_landline", or None if this line
-    isn't a phone/landline line at all (no format check applies).
+    "mobile_intl" / "tollfree" / "std_landline" / "unclassified", or None
+    if this line isn't a phone/landline line at all (no format check
+    applies).
     """
-    digits = _digit_sequence(excel_line)
-    has_tel_prefix = bool(re.search(r"\bTel\.?:?", excel_line, re.I))
-
-    if not digits or len(digits) < 8:
+    parts = _phone_parts(excel_line)
+    if parts is None:
         return None
+    label, numbers = parts
+    return _number_kind(numbers[0], bool(label))
 
-    if has_tel_prefix and digits.startswith("91") and len(digits) == 12:
-        return "mobile_intl"
-    if has_tel_prefix and digits.startswith("1800") and len(digits) == 11:
-        return "tollfree"
-    if not has_tel_prefix and 8 <= len(digits) <= 13:
-        return "std_landline"
-    # Tel.: prefix present but digits don't match either +91-mobile or
-    # 1800-tollfree length -- still a phone line, just not classifiable
-    # against these three formats; flagged separately as Warn rather than
-    # silently skipped, so an unexpected number shape isn't invisible.
-    if has_tel_prefix:
-        return "unclassified"
-    return None
+
+def _number_regex(config_pattern: str) -> str:
+    """The number part of one of config.py's whole-line phone patterns
+    ("^Tel\\.:\\s\\+91\\s\\d{5}\\s\\d{5}$" -> "\\+91\\s\\d{5}\\s\\d{5}"), so the
+    same grouping rule can follow whatever label the sheet uses."""
+    p = config_pattern.lstrip("^").rstrip("$")
+    return re.sub(r"^Tel\\\.:\\s", "", p)
 
 
 def check_phone_number_format(excel_line: str, html_found_line: str, config) -> Optional[dict]:
@@ -908,29 +986,54 @@ def check_phone_number_format(excel_line: str, html_found_line: str, config) -> 
     when the digits themselves are correct. Returns None if this line
     isn't a phone/landline line (no format check applies to it).
     """
-    fmt = classify_expected_phone_format(excel_line, config)
+    parts = _phone_parts(excel_line)
+    if parts is None:
+        return None
+    label, numbers = parts
+    fmt = _number_kind(numbers[0], bool(label))
     if fmt is None:
         return None
 
     found = html_found_line.strip()
+    # Only the phone part of the email's line is held to the format: an
+    # address that shares the line ("... Karnataka, India Tel.: +91 ...")
+    # is checked by the content row above, not here.
+    if label:
+        fm = _PHONE_FIELD_LABEL_RE.search(found)
+        if fm:
+            found = found[fm.start():].strip()
 
     if fmt == "unclassified":
         return {
             "item": f"Phone number format: {excel_line}"[:120],
             "status": "Warn",
             "detail": (
-                f"'{found}' has a 'Tel.:' prefix but its digit count doesn't match either the "
-                f"+91 mobile format (10 digits) or the 1800 toll-free format (7 digits after 1800) — "
-                f"could not verify against the three accepted formats. Verify manually."
+                f"'{found}' has a '{label}' label but its number is neither a +91 mobile "
+                f"number (10 digits) nor a 1800 toll-free number (7 digits after 1800), "
+                f"so it could not be checked against the accepted formats. Check it by eye."
             ),
         }
 
-    pattern_map = {
-        "mobile_intl": (config.phone_format_mobile_intl, "Tel.: +91 XXXXX XXXXX"),
-        "tollfree": (config.phone_format_tollfree, "Tel.: 1800 XXX XXXX"),
-        "std_landline": (config.phone_format_std_landline, "XXX-XXXXXXX (STD code-hyphen-number, no spaces)"),
+    number_patterns = {
+        "mobile_intl": (_number_regex(config.phone_format_mobile_intl), "+91 XXXXX XXXXX"),
+        "tollfree": (_number_regex(config.phone_format_tollfree), "1800 XXX XXXX"),
+        "std_landline": (_number_regex(config.phone_format_std_landline),
+                         "XXX-XXXXXXX (STD code-hyphen-number, no spaces)"),
     }
-    pattern, example = pattern_map[fmt]
+    number_re, number_example = number_patterns[fmt]
+    if label:
+        # A telephone line is always written "Tel.:" (config.py's accepted
+        # formats); any other label ("Mobile.:") is held to the sheet's own.
+        # Every further number on the line follows a comma and may be
+        # mobile or toll-free.
+        shown_label = "Tel.:" if re.match(r"tel", label, re.IGNORECASE) else label
+        any_number = "|".join(f"(?:{_number_regex(p)})" for p in (
+            config.phone_format_mobile_intl, config.phone_format_tollfree))
+        pattern = rf"^{re.escape(shown_label)}\s{number_re}(?:,\s(?:{any_number}))*$"
+        example = f"{shown_label} {number_example}"
+    else:
+        pattern = rf"^{number_re}$"
+        example = number_example
 
     if re.match(pattern, found):
         return {
@@ -956,43 +1059,47 @@ def check_tel_href_matches_number(excel_line: str, html_raw: str, config) -> Opt
     rendered page). Only runs for lines classified as phone/landline
     lines; returns None otherwise.
     """
-    fmt = classify_expected_phone_format(excel_line, config)
-    if fmt is None:
+    parts = _phone_parts(excel_line)
+    if parts is None or _number_kind(parts[1][0], bool(parts[0])) is None:
         return None
-
-    expected_digits = _digit_sequence(excel_line)
-    if not expected_digits:
-        return None
+    numbers = parts[1]
 
     soup = BeautifulSoup(html_raw, "html.parser")
     tel_links = [a for a in soup.find_all("a") if (a.get("href") or "").lower().startswith("tel:")]
 
-    matching_link = None
-    for a in tel_links:
-        href_digits = _digit_sequence(a.get("href") or "")
-        # A tel: href may or may not include the country code; accept a
-        # match either on the full digit string or on the local number
-        # (last 10 digits), so a correctly-linked number in either style
-        # isn't flagged just because of a country-code convention choice.
-        if href_digits == expected_digits or (
-            len(expected_digits) >= 10 and href_digits.endswith(expected_digits[-10:]) and len(href_digits) >= 10
-        ):
-            matching_link = a
-            break
+    def _link_for(expected_digits: str):
+        for a in tel_links:
+            href_digits = _digit_sequence(a.get("href") or "")
+            # A tel: href may or may not include the country code; accept a
+            # match either on the full digit string or on the local number
+            # (last 10 digits), so a correctly-linked number in either style
+            # isn't flagged just because of a country-code convention choice.
+            if href_digits == expected_digits or (
+                len(expected_digits) >= 10 and href_digits.endswith(expected_digits[-10:]) and len(href_digits) >= 10
+            ):
+                return a
+        return None
 
-    if matching_link is not None:
+    # Every number on the line needs its own link — each one is a separate
+    # thing a reader can tap.
+    found_links = [(_n, _link_for(_digit_sequence(_n))) for _n in numbers]
+    unlinked = [_n for _n, _a in found_links if _a is None]
+
+    if not unlinked:
+        hrefs = ", ".join(f'href="{_a.get("href")}"' for _, _a in found_links)
         return {
             "item": f"Tel. link target: {excel_line}"[:120],
             "status": "Pass",
-            "detail": f"A tel: link with matching digits was found (href=\"{matching_link.get('href')}\").",
+            "detail": f"A tel: link with matching digits was found ({hrefs}).",
         }
 
     if tel_links:
         hrefs = ", ".join(f'"{a.get("href")}"' for a in tel_links[:5])
+        missing = ", ".join(unlinked)
         return {
             "item": f"Tel. link target: {excel_line}"[:120],
             "status": "Fail",
-            "detail": f"No tel: link's digits match the Excel number. Tel. link(s) found in HTML: {hrefs}.",
+            "detail": f"No tel: link matches {missing}. Tel. link(s) found in the email: {hrefs}.",
         }
 
     return {
@@ -1071,64 +1178,78 @@ def _line_is_verbatim_in_html(source_line: str, html_raw: str) -> bool:
     return target in flattened
 
 
-def run_dealer_panel_exact_match_qa(panel_lines: List[str], html_raw: str, config) -> pd.DataFrame:
+def _exact_match_verdict(line: str, found: str, html_raw: str, config) -> Tuple[str, str]:
     """
-    For every dealer panel line that the fuzzy Content QA above located in
-    the HTML, verifies the HTML's actual rendered text is identical to the
-    Excel cell's line — casing and internal spacing both included (see
-    _exact_match_comparison_target for how the comparison target is
-    chosen for number/URL-bearing lines, where the label and value
-    normally live in separate DOM nodes). A line the fuzzy check already
-    reported "Missing" is skipped here (nothing exact to compare
-    against); a phone/landline line found here is also where the correct
-    format check (see check_phone_number_format) and the tel: href
-    cross-check (see check_tel_href_matches_number) get applied, since
-    all three checks need the same located HTML line/number.
-    Returns a DataFrame with columns: item, status, detail — appended as
-    additional rows alongside the existing content/style checks, per spec
-    ("include these points as well in different rows").
+    Verifies the HTML's actual rendered text for one dealer-panel line is
+    identical to the Excel cell's line — casing and internal spacing both
+    included (see _exact_match_comparison_target for how the comparison
+    target is chosen for number/URL-bearing lines, where the label and
+    value normally live in separate DOM nodes). Returns (status, detail).
     """
-    if not config.dealer_panel_exact_match:
-        return pd.DataFrame(columns=["item", "status", "detail"])
+    compare_target = _exact_match_comparison_target(line, found, config)
+    exact_ok = found.strip() == compare_target.strip()
+    if exact_ok:
+        status, detail = "Pass", "Found in the email; casing and spacing match the sheet exactly."
+    elif _line_is_verbatim_in_html(compare_target, html_raw):
+        # The characters are identical — the email simply breaks the
+        # address at a different point than the Excel cell does, so the
+        # matched HTML line carries one Excel line plus part of the
+        # next (or vice-versa). That is a layout choice, not the
+        # spacing/casing defect this rule exists to catch, and
+        # reporting it as a Fail buried the real failures in noise.
+        # Downgraded to a Warn (not silently passed) so a genuinely
+        # unintended re-wrap is still visible.
+        status = "Warn"
+        detail = (
+            "Text matches the Excel reference exactly, but the email wraps the line at a "
+            "different point than the Excel cell does — the matched HTML line is "
+            f"\"{found.strip()[:120]}\". Casing and spacing themselves are correct."
+        )
+    else:
+        detail, kinds = describe_exact_mismatch(compare_target, found)
+        # Spacing on its own is a typographic defect, not wrong copy:
+        # still reported, but as a warning. Anything that changes the
+        # words themselves or their casing is still a failure.
+        status = "Warn" if kinds == {"spacing"} else "Fail"
+    return status, detail
 
+
+def build_content_qa(panel_lines: List[str], html_raw: str, config) -> pd.DataFrame:
+    """
+    Content QA: ONE row per line of the dealer's Excel panel.
+
+    Presence and exact match used to be two separate tables that listed
+    every line twice — once as Present/Missing, once as an exact-match
+    Pass/Warn/Fail. They are one question ("is this line in the email,
+    exactly as the sheet has it?"), so each line now gets one verdict:
+
+      * Fail — the line is not in the email at all.
+      * Pass — found, with casing and spacing exactly as in the sheet.
+      * Warn — found, but only the spacing differs, or the email breaks
+        the line at a different point than the sheet does.
+      * Fail — found, but the wording or casing differs.
+
+    A phone line is followed by its own phone-format row and its tel:
+    link row (check_phone_number_format / check_tel_href_matches_number),
+    since all three need the same located HTML line. Returns columns
+    item, status, detail.
+    """
+    presence = compare_source_to_html(panel_lines, html_raw)
     rows = []
-    for line in panel_lines:
-        if normalize_text(line) in {"|", "-", "—"}:
+    for _, pr in presence.iterrows():
+        line = pr["item"]
+        if pr["status"] != "Present":
+            rows.append({"item": line, "status": "Fail", "detail": "Not found in the email."})
             continue
-        found = raw_line_text_from_html(html_raw, line)
+        found = raw_line_text_from_html(html_raw, line) if config.dealer_panel_exact_match else None
         if found is None:
-            continue  # already reported Missing by the fuzzy Content QA table
-
-        compare_target = _exact_match_comparison_target(line, found, config)
-        exact_ok = found.strip() == compare_target.strip()
-        if exact_ok:
-            status, detail = "Pass", "Casing and spacing match the Excel reference exactly."
-        elif _line_is_verbatim_in_html(compare_target, html_raw):
-            # The characters are identical — the email simply breaks the
-            # address at a different point than the Excel cell does, so the
-            # matched HTML line carries one Excel line plus part of the
-            # next (or vice-versa). That is a layout choice, not the
-            # spacing/casing defect this rule exists to catch, and
-            # reporting it as a Fail buried the real failures in noise.
-            # Downgraded to a Warn (not silently passed) so a genuinely
-            # unintended re-wrap is still visible.
-            status = "Warn"
-            detail = (
-                "Text matches the Excel reference exactly, but the email wraps the line at a "
-                "different point than the Excel cell does — the matched HTML line is "
-                f"\"{found.strip()[:120]}\". Casing and spacing themselves are correct."
-            )
-        else:
-            detail, kinds = describe_exact_mismatch(compare_target, found)
-            # Spacing on its own is a typographic defect, not wrong copy:
-            # still reported, but as a warning. Anything that changes the
-            # words themselves or their casing is still a failure.
-            status = "Warn" if kinds == {"spacing"} else "Fail"
-        rows.append({
-            "item": f"Exact match: {line}"[:120],
-            "status": status,
-            "detail": detail,
-        })
+            # Located only by joining several email lines (an address the
+            # email sets across more lines than the sheet), so there is no
+            # single rendered line to compare character by character.
+            rows.append({"item": line, "status": "Pass", "detail": "Found in the email."})
+            continue
+        status, detail = _exact_match_verdict(line, found, html_raw, config)
+        rows.append({"item": line, "status": status, "detail": detail})
 
         phone_status = check_phone_number_format(line, found, config)
         if phone_status is not None:
@@ -1443,7 +1564,7 @@ def run_style_qa(html_raw: str) -> List[StyleIssue]:
     bold_checked_snippets = []
     for tag in scope.find_all(["strong", "b"]):
         style = (tag.get("style") or "").lower()
-        snippet = tag.get_text(strip=True)[:40]
+        snippet = " ".join(tag.get_text(" ", strip=True).split())[:40]
         bold_checked_snippets.append(snippet)
         if "bmwtypenextbold" not in style:
             bold_font_issue = True
@@ -1468,7 +1589,7 @@ def run_style_qa(html_raw: str) -> List[StyleIssue]:
     for td in scope.find_all("td"):
         style = (td.get("style") or "").lower()
         if "font-weight: 300" in style or "font-weight:300" in style:
-            snippet = td.get_text(strip=True)[:40]
+            snippet = " ".join(td.get_text(" ", strip=True).split())[:40]
             light_checked_snippets.append(snippet)
             if "bmwtypenextlight" not in style:
                 light_font_issue = True
@@ -1593,8 +1714,8 @@ def run_style_qa(html_raw: str) -> List[StyleIssue]:
                 f"Button '{label}' has background color #{actual_bg.upper()} — expected {EXT_CFG.cta_button_expected_bg.upper()}."
             ))
     if not button_found:
-        issues.append(StyleIssue("Button border-radius", "Warn", "No CTA-style button (linked, colored <td> wrapping a nested button table) detected in scope to check."))
-        issues.append(StyleIssue("CTA button background color", "Warn", "No CTA-style button detected in scope to check background color."))
+        issues.append(StyleIssue("Button border-radius", "Warn", "No CTA button was found in the email, so its corners could not be checked."))
+        issues.append(StyleIssue("CTA button background color", "Warn", "No CTA button was found in the email, so its colour could not be checked."))
 
     return issues
 
@@ -1965,8 +2086,8 @@ def run_image_size_qa(html_raw: str, images_source) -> List[StyleIssue]:
     else:
         try:
             zf = zipfile.ZipFile(images_source)
-        except Exception as e:
-            issues.append(StyleIssue("Image size", "Warn", f"Could not read the uploaded images zip: {e}"))
+        except Exception:
+            issues.append(StyleIssue("Image size", "Warn", "The images .zip could not be opened, so image sizes were not checked."))
             return issues
         for zi in zf.infolist():
             base = zi.filename.split("/")[-1].lower()
@@ -2190,6 +2311,7 @@ if ext_view == "settings":
                 "of the navigation rail."
             )
 
+    with _set_b:
         with ext_theme.section("advanced", "Session",
                                "Clear everything and start over"):
             st.caption(
@@ -2204,22 +2326,6 @@ if ext_view == "settings":
                     del st.session_state[_k]
                 st.rerun()
 
-    with _set_b:
-        with ext_theme.section("style", "QA thresholds",
-                               "Read-only — defined in modules/config.py"):
-            _cfg_rows = []
-            for _name in sorted(dir(EXT_CFG)):
-                if _name.startswith("_"):
-                    continue
-                _val = getattr(EXT_CFG, _name)
-                if callable(_val):
-                    continue
-                _cfg_rows.append({"Setting": _name, "Value": str(ext_font_label(_val) if isinstance(_val, str) else _val)})
-            if _cfg_rows:
-                st.dataframe(_cfg_rows, use_container_width=True, hide_index=True,
-                             height=260)
-            else:
-                st.caption("No tunable thresholds are exposed by this build.")
 
 
 # =========================================================
@@ -2269,14 +2375,14 @@ with ext_theme.hidden(not ext_workflow_visible):
                     ext_workbook = ext_excel.open_workbook(excel_upload)
                     ext_selected_sheet = st.selectbox(
                         "Excel sheet",
-                        options=["(auto-detect — default behaviour)"] + ext_workbook.sheet_names,
+                        options=["(auto-detect)"] + ext_workbook.sheet_names,
                         index=0,
-                        help="Leave on auto-detect to keep existing behaviour. Pick a sheet to load ONLY that sheet.",
+                        help="Leave on auto-detect to read the 'Mailers - NSC' sheet. Pick another sheet to read only that one.",
                     )
-                    if ext_selected_sheet == "(auto-detect — default behaviour)":
+                    if ext_selected_sheet == "(auto-detect)":
                         ext_selected_sheet = None
-                except Exception as e:
-                    st.warning(f"Could not list sheets for manual selection: {e}")
+                except Exception:
+                    st.warning("The sheets in this Excel file could not be listed.")
 
             dealer_rows: List[DealerRow] = []
             sheet_used = ""
@@ -2299,6 +2405,28 @@ with ext_theme.hidden(not ext_workflow_visible):
                     except Exception as e:
                         st.error(str(e))
 
+            # Two different reasons the dealer list can be empty, and they need
+            # different fixes: nothing was uploaded, or the sheet that was read
+            # has no dealer rows (e.g. a tab picked in "Excel sheet" that lacks
+            # the Dealer / Region / Dealer Panels columns). The second used to
+            # be reported as "Please upload the dealer panel Excel file first"
+            # while the file sat right there, uploaded.
+            if excel_upload is None:
+                _ext_no_rows_chip = "No Excel sheet yet"
+                _ext_no_rows_msg = (
+                    "Please upload the dealer panel Excel file first. If it still shows as "
+                    "uploaded above, remove it (×) and upload it again — the app restarts "
+                    "now and then, and an upload does not survive a restart."
+                )
+            else:
+                _ext_no_rows_chip = "No dealers in this sheet"
+                _ext_no_rows_msg = (
+                    f"No dealers could be read from the sheet in use"
+                    f"{f' (' + repr(ext_selected_sheet) + ')' if ext_selected_sheet else ''}. "
+                    "Pick the sheet that has the Dealer, Region and Dealer Panels columns, "
+                    "or set Excel sheet back to auto-detect."
+                )
+
             st.markdown('<div style="height:.45rem"></div>', unsafe_allow_html=True)
 
             input_mode = st.radio(
@@ -2310,13 +2438,25 @@ with ext_theme.hidden(not ext_workflow_visible):
             # Each entry: {"name": label, "html": str, "images": None|zipfile-like|dict}
             email_jobs: List[Dict] = []
 
-            if input_mode == "HTML file(s)":
+            # BOTH uploaders are always drawn; the one not in use is hidden.
+            # Streamlit throws away a widget's contents on any rerun that does
+            # not draw it, so drawing only the selected one meant that
+            # flicking the switch to HTML and back silently emptied the
+            # model-zip uploader (and vice versa).
+            with ext_theme.hidden(input_mode != "HTML file(s)"):
                 html_files = st.file_uploader(
                     "HTML / HTM file(s)", type=["html", "htm", "txt"],
                     accept_multiple_files=True)
                 images_zip = st.file_uploader(
                     "Images .zip (optional — enables the 300KB image-size check)",
                     type=["zip"])
+            with ext_theme.hidden(input_mode == "HTML file(s)"):
+                model_zips = st.file_uploader(
+                    "Model folder(s) as .zip", type=["zip"], accept_multiple_files=True,
+                    help="One zip per model, or a single campaign zip holding a folder "
+                         "per model — however deeply the folders are nested.")
+
+            if input_mode == "HTML file(s)":
                 if html_files:
                     for hf in html_files:
                         html_text = hf.getvalue().decode("utf-8", errors="ignore")
@@ -2327,17 +2467,13 @@ with ext_theme.hidden(not ext_workflow_visible):
                             "images_zip_bytes": images_zip.getvalue() if images_zip is not None else None,
                         })
             else:
-                model_zips = st.file_uploader(
-                    "Model folder(s) as .zip", type=["zip"], accept_multiple_files=True,
-                    help="One zip per model, or a single campaign zip holding a folder "
-                         "per model — however deeply the folders are nested.")
                 if model_zips:
                     for mz in model_zips:
                         try:
                             _bundled, _note = ext_model_bundle.extract_models(
                                 BytesIO(mz.getvalue()), mz.name)
-                        except Exception as e:
-                            st.error(f"Could not read '{mz.name}': {e}")
+                        except Exception:
+                            st.error(f"'{mz.name}' could not be opened as a zip file.")
                             continue
                         if not _bundled:
                             st.error(_note or f"No HTML file found inside '{mz.name}'.")
@@ -2396,20 +2532,23 @@ with ext_theme.hidden(not ext_workflow_visible):
                 ext_dealer_options = ["(none — use automatic HTML detection)"] + ext_dealer.build_dealer_options(dealer_rows)
                 ext_dealer_choice = st.selectbox(
                     "Dealer selection", options=ext_dealer_options, key="ext_dealer_dropdown_live",
-                    help="Choosing a dealer makes that dealer authoritative for every check in this run.",
+                    help="Pick a dealer to check every email against that dealer's details, "
+                         "instead of the dealer detected from each email.",
                 )
                 if ext_dealer_choice != "(none — use automatic HTML detection)":
                     ext_selected_dealer_row = ext_dealer.resolve_selected_dealer(dealer_rows, ext_dealer_choice)
                     if ext_selected_dealer_row:
                         st.success(f"Master dealer set to: {ext_selected_dealer_row.dealer} ({ext_selected_dealer_row.region})")
             else:
-                st.info("Upload the dealer panel Excel file first — the dealer list appears here once it's loaded.")
+                if excel_upload is None:
+                    st.info("Upload the dealer panel Excel file first — the dealer list appears here once it's loaded.")
+                else:
+                    st.warning(_ext_no_rows_msg)
 
             st.markdown(
                 '<div style="height:.2rem"></div>'
                 '<div class="dq-head-sub" style="margin-bottom:.35rem">'
-                'Opt-in checks — off by default. The tool behaves exactly as before '
-                'if left unticked.</div>',
+                'Optional checks — off unless you tick them.</div>',
                 unsafe_allow_html=True,
             )
             ext_check_dealer_in_banner = st.checkbox("Dealer exists in Banner", value=False, key="ext_dealer_in_banner")
@@ -2417,7 +2556,8 @@ with ext_theme.hidden(not ext_workflow_visible):
 
             ext_run_advanced_qa = st.toggle(
                 "Enable Advanced QA (Body / Banner / OCR)", value=False, key="ext_run_advanced_qa",
-                help="Turn on to compute Banner / Body / OCR QA tabs below the existing report. Existing QA always runs regardless of this toggle.",
+                help="Turn on to also check the banner text and the body copy against a master. "
+                     "All the other checks always run.",
             )
 
             # Where the Headline and Subheadline sit on the banner is a
@@ -2432,9 +2572,11 @@ with ext_theme.hidden(not ext_workflow_visible):
                 ext_ocr.BANNER_LAYOUT_AUTO: "Auto-detect (recommended)",
                 ext_ocr.BANNER_LAYOUT_LATEST: "Latest guideline — headline at the top",
                 ext_ocr.BANNER_LAYOUT_CLASSIC: "Classic guideline — headline at the foot",
-                ext_ocr.BANNER_LAYOUT_SIZE_BANDS: "Font size only (pre-guideline behaviour)",
+                ext_ocr.BANNER_LAYOUT_SIZE_BANDS: "Font size only",
             }
-            if ext_run_advanced_qa:
+            # Always drawn (hidden while Advanced QA is off) so a chosen layout
+            # survives switching Advanced QA off and on again.
+            with ext_theme.hidden(not ext_run_advanced_qa):
                 ext_banner_layout = st.selectbox(
                     "Banner layout",
                     options=list(_ext_layout_labels.keys()),
@@ -2445,16 +2587,13 @@ with ext_theme.hidden(not ext_workflow_visible):
                          "Auto-detect works out which guideline each banner follows "
                          "from where its copy sits.",
                 )
-            else:
-                ext_banner_layout = st.session_state.get(
-                    "ext_banner_layout", ext_ocr.BANNER_LAYOUT_AUTO)
 
             # A plain statement of what this run will actually cover, so the
             # Run button is never pressed on a half-filled form and then
             # answered with a red error further down the page.
             _ready_bits = [
                 ext_theme.chip(
-                    f"{len(dealer_rows)} dealer row(s)" if dealer_rows else "No Excel sheet yet",
+                    f"{len(dealer_rows)} dealer row(s)" if dealer_rows else _ext_no_rows_chip,
                     "ok" if dealer_rows else "warn",
                     "check-circle" if dealer_rows else "alert-triangle",
                 ),
@@ -2500,7 +2639,7 @@ with ext_theme.hidden(not ext_workflow_visible):
         )
         ext_theme.sidebar_ready_note(
             (f"{len(dealer_rows)} dealer row(s)" if dealer_rows
-             else "No Excel sheet yet", bool(dealer_rows)),
+             else _ext_no_rows_chip, bool(dealer_rows)),
             (f"{len(email_jobs)} email(s)" if email_jobs
              else "No email yet", bool(email_jobs)),
         )
@@ -2517,10 +2656,8 @@ with ext_theme.hidden(not ext_workflow_visible):
         """
         Thin delegate to the single shared table-rendering implementation in
         modules/results_ui.py (see that module's docstring for why the
-        implementation itself lives there and not here) — KPI counts always
-        visible above a tabbed record table (Issues / Warnings / Passed /
-        All records), plus an Expand button that opens the complete table in
-        a popup with its own close button.
+        implementation itself lives there and not here) — one complete
+        "All records" table under the section's count tiles.
         """
         ext_results_ui.render_qa_table(df, status_col=status_col, table_key=table_key, pass_label=pass_label)
 
@@ -2558,10 +2695,8 @@ with ext_theme.hidden(not ext_workflow_visible):
                     ) if is_manual
                 ]
                 st.info(
-                    f"Manual Text Mode is ACTIVE for: {', '.join(_ext_manual_fields_used)}. "
-                    f"Those field(s) always use the typed value. Any field left blank here still "
-                    f"falls through to Master JPG / Master PDF / Master HTML ZIP / Dealer Dropdown, "
-                    f"whichever is active — master-asset uploads below are NOT disabled."
+                    f"Typed text is used for: {', '.join(_ext_manual_fields_used)}. "
+                    f"Fields left blank still come from the master image, PDF or HTML zip."
                 )
 
         with ext_theme.section(
@@ -2630,9 +2765,9 @@ with ext_theme.hidden(not ext_workflow_visible):
             ext_pdf_emailer_index = _cached_emailer_index(ext_master_pdf_upload.getvalue())
             if ext_pdf_emailer_index is not None and ext_pdf_emailer_index.entries:
                 ext_pdf_auto_map = ext_master_pdf_multi.build_auto_map(email_jobs, ext_pdf_emailer_index)
-        except Exception as e:
+        except Exception:
             ext_pdf_emailer_index = None
-            st.warning(f"Could not scan the Master PDF for multiple emailer pages: {e}")
+            st.warning("The master PDF could not be scanned for its emailer pages.")
 
     # ---- Master images, routed per model ----------------------------
     # Uploaded files first, then any creative a campaign zip carried
@@ -2719,7 +2854,7 @@ with ext_theme.hidden(not ext_workflow_visible):
     if len(_ext_job_names) > 1 or (ext_pdf_emailer_index is not None and ext_pdf_emailer_index.entries):
         with ext_theme.section(
             "multi", "Per-Adapt Masters",
-            "Give each uploaded email its own Master — anything left empty falls back to the global controls above",
+            "Give each uploaded email its own Master — anything left empty uses the Masters above",
         ):
             ext_multi_assignments = ext_multi_master.render_panel(
                 _ext_job_names,
@@ -2756,7 +2891,7 @@ with ext_theme.hidden(not ext_workflow_visible):
 
     if run:
         if not dealer_rows:
-            st.error("Please upload the dealer panel Excel file first.")
+            st.error(_ext_no_rows_msg)
             st.stop()
         if not email_jobs:
             st.error("Please upload at least one HTML file or model folder.")
@@ -2852,7 +2987,9 @@ with ext_theme.hidden(not ext_workflow_visible):
                 ext_job_summary_slot = st.container()
 
                 panel_lines = panel_text_to_lines(dealer_row.panel_text)
-                results_df = compare_source_to_html(panel_lines, job["html"])
+                # One row per sheet line: presence and exact match together
+                # (see build_content_qa), phone checks under their line.
+                results_df = build_content_qa(panel_lines, job["html"], EXT_CFG)
 
                 # Feature 16 — Dealer Website Link QA: verifies the CTA button's
                 # href AND the Dealer Panel's own "Website: ..." line both belong
@@ -2872,10 +3009,8 @@ with ext_theme.hidden(not ext_workflow_visible):
                         "item": "Dealer Website / CTA link checks",
                         "status": "Warn",
                         "detail": (
-                            "SKIPPED — modules/website_link_qa.py is not present in this "
-                            "folder. Copy that file from your existing project's modules/ "
-                            "folder to re-enable the Dealer Panel Website and CTA Button "
-                            "Link checks. Every other check has run normally."
+                            "Website and CTA link checks are not available in this copy of "
+                            "the tool. Every other check has run normally."
                         ),
                     }]})()
                 else:
@@ -2904,19 +3039,14 @@ with ext_theme.hidden(not ext_workflow_visible):
 
                 # When the dropdown-SELECTED dealer doesn't match the dealer this
                 # email's HTML actually belongs to (dealer_mismatch, computed
-                # above), every "Missing" row AND every website-link-QA "Fail"
-                # row in Content QA is collapsed onto the SAME single shared
-                # explanation. "Missing" additionally becomes "Fail" — the
-                # content isn't merely absent, it's actively wrong for the
-                # selected dealer, which is a stronger, more accurate signal for
-                # a reviewer scanning Pass/Fail/Warn at a glance. Repeating a
+                # above), every "Fail" row in Content QA is collapsed onto the
+                # SAME single shared explanation — the content isn't merely
+                # absent, it's actively wrong for the selected dealer. Repeating a
                 # near-identical per-row detail for every one of the dozens of
                 # mismatched lines added no information beyond what the mismatch
                 # banner above the table already explains, so all of them share
                 # one message instead.
                 if dealer_mismatch:
-                    missing_mask = results_df["status"] == "Missing"
-                    results_df.loc[missing_mask, "status"] = "Fail"
                     combined_mismatch_detail = (
                         f"Dealer mismatch — this email's HTML belongs to "
                         f"{auto_detected_dealer_row.dealer if auto_detected_dealer_row else 'a different dealer'}, "
@@ -2926,40 +3056,19 @@ with ext_theme.hidden(not ext_workflow_visible):
                     results_df.loc[fail_mask, "detail"] = combined_mismatch_detail
 
                 total = len(results_df)
-                # "Present" covers both the original fuzzy-match status value AND
-                # the website-link QA rows' "Pass" status (added just above) — both
-                # mean "this item is correct" and should count the same way in the
-                # Total/Present/Missing metrics. Likewise "Missing" now also covers
-                # website-link QA "Fail" rows. "Warn" rows (e.g. no CTA button
-                # found at all) are deliberately excluded from both counts, same
-                # as they always were for any other Warn-status row.
-                present = int(results_df["status"].isin(["Present", "Pass"]).sum()) if total else 0
-                missing = int(results_df["status"].isin(["Missing", "Fail"]).sum()) if total else 0
+                present = int((results_df["status"] == "Pass").sum()) if total else 0
+                missing = int((results_df["status"] == "Fail").sum()) if total else 0
                 content_warns = total - present - missing
 
                 with ext_theme.section(
                     "content", "Content QA",
-                    "Every line of the dealer's Excel panel must appear in the email",
+                    "Every line of the dealer's Excel panel must be in the email, exactly as written",
                 ):
                     ext_results_ui.render_stat_row(
                         passed=present, warnings=content_warns, failed=missing,
                         total=total, total_label="Content checks",
                     )
-                    render_qa_table(results_df, status_col="status", table_key=f"content_{job_idx}", pass_label="Present")
-
-                exact_match_df = run_dealer_panel_exact_match_qa(panel_lines, job["html"], EXT_CFG)
-                if len(exact_match_df):
-                    with ext_theme.section(
-                        "exact", "Dealer Panel Exact Match QA",
-                        "Case- and space-sensitive comparison, plus phone format and link-target checks",
-                    ):
-                        ext_results_ui.render_stat_row(
-                            passed=int((exact_match_df["status"] == "Pass").sum()),
-                            warnings=int((exact_match_df["status"] == "Warn").sum()),
-                            failed=int((exact_match_df["status"] == "Fail").sum()),
-                            total=len(exact_match_df), total_label="Exact-match checks",
-                        )
-                        render_qa_table(exact_match_df, status_col="status", table_key=f"exact_{job_idx}", pass_label="Passed")
+                    render_qa_table(results_df, status_col="status", table_key=f"content_{job_idx}", pass_label="Passed")
 
                 with ext_theme.section(
                     "style", "Styling QA",
@@ -2983,50 +3092,30 @@ with ext_theme.hidden(not ext_workflow_visible):
                     )
                     render_qa_table(style_df, status_col="severity", table_key=f"style_{job_idx}", pass_label="Passed")
 
-                exact_match_fails = int((exact_match_df["status"] == "Fail").sum()) if len(exact_match_df) else 0
-                exact_match_warns = int((exact_match_df["status"] == "Warn").sum()) if len(exact_match_df) else 0
-                exact_match_passes = (
-                    len(exact_match_df) - exact_match_fails - exact_match_warns
-                ) if len(exact_match_df) else 0
-
                 # The run-level KPI tiles, rendered back up at the top of this
                 # email's block now that every table has been computed.
                 with ext_job_summary_slot:
                     ext_results_ui.render_stat_row(
-                        passed=present + passes + exact_match_passes,
-                        warnings=content_warns + warns + exact_match_warns,
-                        failed=missing + fails + exact_match_fails,
-                        total=total + len(style_df) + len(exact_match_df),
+                        passed=present + passes,
+                        warnings=content_warns + warns,
+                        failed=missing + fails,
+                        total=total + len(style_df),
                         total_label="Total checks",
                     )
 
                 if dealer_mismatch:
-                    st.error("SELECTED DEALER MISMATCH — see the warning above. Content/exact-match failures below are expected because this email is being checked against a different dealer's data than the one baked into its HTML.")
-                elif missing > 0 or fails > 0 or exact_match_fails > 0:
+                    st.error("SELECTED DEALER MISMATCH — see the warning above. Content failures below are expected because this email is being checked against a different dealer's data than the one built into it.")
+                elif missing > 0 or fails > 0:
                     st.warning("Some content is missing and/or styling rules failed — see tables above.")
                 else:
                     st.success("All content found and all styling checks passed (or only warnings where data wasn't available).")
-
-                # Fold the exact-match / phone-format / tel-href-target checks
-                # into the SAME DataFrame shape (rule/severity/detail) used for
-                # the Excel export, so the Consolidated Excel QA Report captures
-                # these new checks too — not just the on-screen view above, which
-                # already rendered exact_match_df on its own with its own
-                # item/status/detail columns.
-                if len(exact_match_df):
-                    exact_match_for_report = exact_match_df.rename(
-                        columns={"item": "rule", "status": "severity"}
-                    )[["rule", "severity", "detail"]]
-                    style_df_for_report = pd.concat([style_df, exact_match_for_report], ignore_index=True)
-                else:
-                    style_df_for_report = style_df
 
                 ext_job_report = ext_excel_report.JobReportData(
                     job_name=job["name"],
                     dealer=dealer_row.dealer,
                     region=dealer_row.region,
                     content_df=results_df,
-                    style_df=style_df_for_report,
+                    style_df=style_df,
                 )
                 ext_report_jobs.append(ext_job_report)
 
@@ -3046,11 +3135,14 @@ with ext_theme.hidden(not ext_workflow_visible):
                         _ocr_ok, _ocr_engine, _ocr_msg = ext_ocr.ocr_status()
                         if not _ocr_ok:
                             st.error(
-                                "**Banner OCR engine not found — Headline, Subheadline and "
-                                "Dealer Name cannot be read from the banner.**\n\n" + _ocr_msg
+                                "Banner text cannot be read on this computer, so the Headline, "
+                                "Subheadline and Dealer Name checks are skipped."
                             )
                         elif _ocr_engine == "rapidocr":
-                            st.warning(_ocr_msg)
+                            st.warning(
+                                "Banner text is being read with a less accurate method on this "
+                                "computer, so words on the banner may run together."
+                            )
 
                         # Manual Text is now per-field (see manual_mode.py) rather than
                         # an all-or-nothing switch, so it no longer forces the other
@@ -3081,31 +3173,19 @@ with ext_theme.hidden(not ext_workflow_visible):
                         )[0]
                         if _assign is not None and _assign.jpg_bytes:
                             job_master_jpg = _assign.jpg_file()
-                            job_master_jpg_origin = f"per-adapt Master JPG ({_assign.jpg_name})"
                         elif _routed_master_img is not None:
                             job_master_jpg = BytesIO(_routed_master_img.data)
-                            job_master_jpg_origin = (
-                                f"Master image '{_routed_master_img.file_name}' "
-                                f"(routed to {_routed_master_img.model_label}"
-                                + (" from the campaign zip)"
-                                   if _routed_master_img.origin == "bundle" else ")")
-                            )
                         elif ext_master_jpg_upload is not None:
                             job_master_jpg = BytesIO(ext_master_jpg_upload.getvalue())
-                            job_master_jpg_origin = "global Master JPG"
                         else:
                             job_master_jpg = None
-                            job_master_jpg_origin = ""
 
                         if _assign is not None and _assign.html_zip_bytes:
                             job_master_html_zip = _assign.html_zip_file()
-                            job_master_html_zip_origin = f"per-adapt Master HTML ZIP ({_assign.html_zip_name})"
                         elif ext_master_html_zip_upload is not None:
                             job_master_html_zip = BytesIO(ext_master_html_zip_upload.getvalue())
-                            job_master_html_zip_origin = "global Master HTML ZIP"
                         else:
                             job_master_html_zip = None
-                            job_master_html_zip_origin = ""
 
                         if ext_master_pdf_upload is not None:
                             job_master_pdf = BytesIO(ext_master_pdf_upload.getvalue())
@@ -3120,19 +3200,12 @@ with ext_theme.hidden(not ext_workflow_visible):
                         _auto_entry = (ext_pdf_auto_map.get(job["name"]) or (None, ""))[0]
                         if _assign is not None and _assign.pdf_page and _assign.pdf_page_source == "manual":
                             job_master_pdf_page = int(_assign.pdf_page)
-                            job_master_pdf_origin = f"master PDF page {job_master_pdf_page} (pinned for this adapt)"
                         elif _auto_entry is not None:
                             job_master_pdf_page = int(_auto_entry.page_number)
-                            job_master_pdf_origin = (
-                                f"master PDF page {job_master_pdf_page} "
-                                f"(auto-routed to {_auto_entry.model_label})"
-                            )
                         elif ext_master_pdf_page and ext_master_pdf_page > 0:
                             job_master_pdf_page = int(ext_master_pdf_page)
-                            job_master_pdf_origin = f"master PDF page {job_master_pdf_page}"
                         else:
                             job_master_pdf_page = None
-                            job_master_pdf_origin = "master PDF (auto-detected page)"
 
                         # Manual Text / Manual Body: per-adapt value wins per FIELD,
                         # so an adapt can override just its headline and still take
@@ -3200,26 +3273,23 @@ with ext_theme.hidden(not ext_workflow_visible):
                         # uploads themselves still follows Master JPG > Master PDF >
                         # Master HTML ZIP, same order as priority.py.
                         ext_master_banner_img = None
-                        ext_master_banner_note = ""
+                        ext_master_unreadable = False
                         ext_master_html_text = None  # only populated when Master HTML ZIP supplied the banner
                         try:
                             if job_master_jpg is not None:
                                 img = ext_master_image.load_image_from_upload(job_master_jpg)
                                 crop_out = ext_master_image.crop_banner_top_to_dear(img, EXT_CFG)
                                 ext_master_banner_img = crop_out.banner_image
-                                ext_master_banner_note = f"Master from {job_master_jpg_origin}. {crop_out.note}"
                             elif job_master_pdf is not None:
                                 crop_out = ext_master_pdf.get_master_banner_from_pdf(
                                     job_master_pdf, job_master_pdf_page, EXT_CFG)
                                 ext_master_banner_img = crop_out.banner_image
-                                ext_master_banner_note = f"Master from {job_master_pdf_origin}. {crop_out.note}"
                             elif job_master_html_zip is not None:
                                 mh = ext_master_html_zip.load_master_from_html_zip(job_master_html_zip, EXT_CFG)
                                 ext_master_banner_img = mh.banner_result.image
-                                ext_master_banner_note = f"Master from {job_master_html_zip_origin}. {mh.note}"
                                 ext_master_html_text = mh.html_text
-                        except Exception as e:
-                            ext_master_banner_note = f"Could not build Master Banner: {e}"
+                        except Exception:
+                            ext_master_unreadable = True
 
                         # -----------------------------------------------------------
                         # Expected Headline / Subheadline / Dealer Name / Body Text are
@@ -3240,7 +3310,6 @@ with ext_theme.hidden(not ext_workflow_visible):
                         master_derived_dealer_name = ""
                         master_derived_body_text = ""
                         ext_master_banner_clustered_lines = None
-                        ext_master_ocr_warning = ""
 
                         # A dealer-name HINT to search for while OCR'ing the Master
                         # Banner, if one is already known at this point (Dealer
@@ -3308,11 +3377,9 @@ with ext_theme.hidden(not ext_workflow_visible):
                                 # validation even when Subheadline and Dealer Name
                                 # share a font size on the banner.
                                 master_derived_dealer_name = ext_master_banner_clustered_lines.dealer_text
-                                if _master_lines_res.warning:
-                                    ext_master_ocr_warning = _master_lines_res.warning
-                            except Exception as e:
+                            except Exception:
                                 ext_master_banner_clustered_lines = None
-                                ext_master_ocr_warning = f"Could not OCR the Master Banner for Headline/Subheadline/Dealer Name: {e}"
+                                ext_master_unreadable = True
 
                         if ext_master_html_text:
                             master_derived_body_text = html_to_visible_text(BeautifulSoup(ext_master_html_text, "html.parser"))
@@ -3341,42 +3408,11 @@ with ext_theme.hidden(not ext_workflow_visible):
                         else:
                             effective_dealer_name = ""
 
-                        # Everything this run actually used, gathered into one
-                        # panel rather than four grey captions scattered down the
-                        # card — see `ext_theme.run_notes`. Collected here, in the
-                        # order the run works them out, and rendered once below.
-                        _ext_run_notes: List[Tuple[str, str]] = []
-                        if ext_master_ocr_warning:
-                            _ext_run_notes.append(("Master banner OCR", ext_master_ocr_warning))
-
                         # Manual Body Comparison (As Is / To Be) always overrides the
                         # master-derived body text if the user typed a "To Be" value —
                         # that section is an explicit manual override, unchanged.
                         if job_body_to_be.strip():
                             expected_body_text = job_body_to_be
-
-                        _ext_run_notes.append(
-                            ("Master", ext_master_banner_note
-                             or "No Master JPG, PDF or HTML ZIP was supplied for this email, "
-                                "so nothing was read off a master creative."))
-
-                        # Which guideline each banner was read as. Worth
-                        # saying out loud: if a Headline comes back looking
-                        # like a model badge, this is the line that explains
-                        # why, and the Banner layout control is the fix.
-                        _ext_layout_names = {
-                            ext_ocr.BANNER_LAYOUT_LATEST: "latest guideline (headline at the top)",
-                            ext_ocr.BANNER_LAYOUT_CLASSIC: "classic guideline (headline at the foot)",
-                            ext_ocr.BANNER_LAYOUT_SIZE_BANDS: "font size only",
-                        }
-                        _ext_layout_bits = []
-                        if ext_master_banner_clustered_lines is not None:
-                            _ext_layout_bits.append(
-                                "Master banner read as "
-                                + _ext_layout_names.get(
-                                    ext_master_banner_clustered_lines.layout_used,
-                                    ext_master_banner_clustered_lines.layout_used or "unknown")
-                            )
 
                         # Input banner pixels. A model-folder .zip already contains
                         # everything needed (index.html + images/), so it is used
@@ -3393,15 +3429,14 @@ with ext_theme.hidden(not ext_workflow_visible):
                             elif isinstance(ext_input_zip_for_banner, dict):
                                 ext_input_banner_result = None
                                 st.caption(
-                                    "Banner pixel extraction needs the image files themselves — "
-                                    "re-upload this email as a model-folder .zip, or add an images .zip "
-                                    "alongside the HTML, to enable Banner QA."
+                                    "Banner QA needs the email's images — upload this email as a "
+                                    "model-folder .zip, or add an images .zip alongside the HTML."
                                 )
                             elif ext_input_zip_for_banner is not None:
                                 ext_input_banner_result = ext_banner_detect.extract_banner_image(
                                     job["html"], ext_input_zip_for_banner, EXT_CFG)
-                        except Exception as e:
-                            st.caption(f"Could not extract input banner: {e}")
+                        except Exception:
+                            st.caption("The banner image could not be read from this email.")
 
                         ext_input_banner_img = ext_input_banner_result.image if ext_input_banner_result else None
 
@@ -3412,8 +3447,6 @@ with ext_theme.hidden(not ext_workflow_visible):
                             ocr_res = ext_ocr.extract_text(ext_input_banner_img, prefer=EXT_OCR_PREFER_KEY)
                             ext_input_banner_ocr_text = ocr_res.text
                             ext_input_banner_engine = ocr_res.engine_used
-                            if ocr_res.warning:
-                                _ext_run_notes.append(("Email banner OCR", ocr_res.warning))
                             # Also run structured line extraction so Headline / Subheadline
                             # can be matched against their own font-size band instead of
                             # the whole banner text blob (fixes headline+subheadline
@@ -3443,29 +3476,29 @@ with ext_theme.hidden(not ext_workflow_visible):
                             except Exception:
                                 ext_input_banner_clustered_lines = None
 
-                        if ext_input_banner_clustered_lines is not None:
-                            _ext_layout_bits.append(
-                                "this email's banner read as "
-                                + _ext_layout_names.get(
-                                    ext_input_banner_clustered_lines.layout_used,
-                                    ext_input_banner_clustered_lines.layout_used or "unknown")
+
+                        if ext_master_unreadable:
+                            st.warning(
+                                "The master for this email could not be read, so its banner "
+                                "was not compared with the master."
                             )
-                        _ext_run_notes.append((
-                            "Banner layout",
-                            ("; ".join(_ext_layout_bits)
-                             + ("." if ext_banner_layout == ext_ocr.BANNER_LAYOUT_AUTO
-                                else " (chosen by hand in Validation Options)."))
-                            if _ext_layout_bits else
-                            "Neither banner could be read, so no guideline was detected."
-                        ))
-                        ext_theme.run_notes(_ext_run_notes)
 
                         ext_html_body_text = html_to_visible_text(BeautifulSoup(job["html"], "html.parser"))
                         # Dealer-in-Body must only look at the greeting/body-copy
                         # portion (Dear ... up to the "BMW <Dealer>" sign-off line),
                         # NOT the dealer panel further down — that's already QA'd
                         # separately against the Excel sheet in the main report above.
-                        ext_html_body_greeting_slice = extract_body_greeting_slice(ext_html_body_text, effective_dealer_name)
+                        # The dealer to look for in the banner and the body: the
+                        # one named by a master or the dropdown when there is one,
+                        # otherwise the dealer this email was matched to. Without
+                        # this fallback both checks reported "no dealer name
+                        # available" on every run that relied on auto-detection.
+                        # The body slice must use the SAME name: it ends at the
+                        # "BMW <Dealer>" panel heading, and without a name it ran
+                        # on to the end of the email, panel included — so the
+                        # dealer was always "found in the body".
+                        _dealer_name_to_find = effective_dealer_name or dealer_row.dealer
+                        ext_html_body_greeting_slice = extract_body_greeting_slice(ext_html_body_text, _dealer_name_to_find)
 
                         ext_tab_names = ["Body QA", "Banner QA", "Summary"]
                         ext_tabs = st.tabs(ext_tab_names)
@@ -3473,7 +3506,7 @@ with ext_theme.hidden(not ext_workflow_visible):
 
                         with ext_tabs[0]:
                             body_dealer_result = ext_body_qa.run_body_dealer_qa(
-                                ext_check_dealer_in_body, effective_dealer_name, ext_html_body_greeting_slice
+                                ext_check_dealer_in_body, _dealer_name_to_find, ext_html_body_greeting_slice
                             )
                             ext_results_ui.render_module_result(body_dealer_result, table_key=f"adv_body_dealer_{job_idx}")
                             st.divider()
@@ -3488,9 +3521,8 @@ with ext_theme.hidden(not ext_workflow_visible):
                         with ext_tabs[1]:
                             if ext_input_banner_img is None:
                                 st.info(
-                                    "No input banner image available — this email's HTML has no usable "
-                                    "<img> banner, or its image files were not supplied. Upload the email "
-                                    "as a model-folder .zip (index.html + images/) to enable this tab."
+                                    "No banner image was found for this email. Upload it as a "
+                                    "model-folder .zip (index.html + images) to check the banner."
                                 )
                             else:
                                 # expected_headline / expected_subheadline were already
@@ -3520,7 +3552,7 @@ with ext_theme.hidden(not ext_workflow_visible):
 
                                 st.divider()
                                 dealer_banner_result = ext_dealer.run_dealer_name_validation(
-                                    dealer_name=effective_dealer_name,
+                                    dealer_name=_dealer_name_to_find,
                                     check_in_banner=ext_check_dealer_in_banner,
                                     check_in_body=False,
                                     banner_ocr_text=ext_input_banner_ocr_text,

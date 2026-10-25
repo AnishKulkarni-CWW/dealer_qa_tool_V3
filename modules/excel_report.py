@@ -214,21 +214,16 @@ def _build_overview_sheet(wb: Workbook, jobs: List[JobReportData]) -> None:
 
     headers = [
         "Email / Model", "Dealer", "Region",
-        "Content Present", "Content Missing",
+        "Content Pass", "Content Warn", "Content Fail",
         "Style Pass", "Style Warn", "Style Fail",
         "Advanced QA Pass", "Advanced QA Warn", "Advanced QA Fail",
         "Overall",
     ]
     rows = []
     for job in jobs:
-        content_present = content_missing = 0
-        if job.content_df is not None and len(job.content_df):
-            # "Present"/"Missing" cover the original fuzzy-match rows; the
-            # website-link QA rows (Feature 16) use "Pass"/"Fail" for the
-            # same content_df, meaning the same thing ("correct"/"wrong"),
-            # so both status vocabularies are counted together here.
-            content_present = int(job.content_df["status"].isin(["Present", "Pass"]).sum())
-            content_missing = int(job.content_df["status"].isin(["Missing", "Fail"]).sum())
+        content_counts = _counts_from_status_series(
+            [str(v) for v in job.content_df["status"]]
+            if job.content_df is not None and len(job.content_df) else [])
 
         style_pass = style_warn = style_fail = 0
         if job.style_df is not None and len(job.style_df):
@@ -244,13 +239,13 @@ def _build_overview_sheet(wb: Workbook, jobs: List[JobReportData]) -> None:
                 adv_warn += w
                 adv_fail += f
 
-        overall = "Fail" if (content_missing or style_fail or adv_fail) else (
-            "Warn" if (style_warn or adv_warn) else "Pass"
+        overall = "Fail" if (content_counts["Fail"] or style_fail or adv_fail) else (
+            "Warn" if (content_counts["Warn"] or style_warn or adv_warn) else "Pass"
         )
 
         rows.append([
             job.job_name, job.dealer, job.region,
-            content_present, content_missing,
+            content_counts["Pass"], content_counts["Warn"], content_counts["Fail"],
             style_pass, style_warn, style_fail,
             adv_pass, adv_warn, adv_fail,
             overall,
@@ -259,7 +254,7 @@ def _build_overview_sheet(wb: Workbook, jobs: List[JobReportData]) -> None:
     _write_table(
         ws, row, headers, rows,
         status_col_indexes=[len(headers)],
-        col_widths=[30, 20, 14, 14, 14, 12, 12, 12, 16, 16, 16, 12],
+        col_widths=[30, 20, 14, 13, 13, 13, 12, 12, 12, 16, 16, 16, 12],
     )
 
 
@@ -360,7 +355,7 @@ def _build_model_sheet(wb: Workbook, job: JobReportData, sheet_name: str) -> Non
     # ---- content --------------------------------------------------------
     row = _write_section_heading(
         ws, row, "CONTENT QA",
-        "Every line of the dealer's Excel panel must appear in the email.")
+        "Every line of the dealer's Excel panel must be in the email, exactly as written.")
     row = _write_counts_line(ws, row, "Totals", content_counts)
     content_rows = [
         [r.get("item", ""), r.get("status", ""), str(r.get("detail", "") or "")]
