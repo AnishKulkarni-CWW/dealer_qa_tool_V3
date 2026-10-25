@@ -6,25 +6,21 @@ Match QA, Styling QA, and each Advanced QA module), and they must all
 behave identically — otherwise a reviewer learns one table's rules and is
 then surprised by the next one.
 
-THE TABLE, AS REDESIGNED
-------------------------
-Every result table now renders as the reference design's tabbed record
-view:
+THE TABLE
+---------
+Every result table is one complete list — "All records" — under the
+section's count tiles:
 
-    ┌ 3 issues · 1 warning · 20 passed ─────────── [↗ Expand] ┐
-    │ Issues (3) │ Warnings (1) │ Passed (20) │ All (24)      │
-    └──────────────────────────────────────────────────────────┘
-      #  STATUS   ITEM                DETAIL
+    [ checks ] [ passed ] [ failed ] [ warnings ]      <- render_stat_row
+    All records (24)
+      #  ITEM                STATUS   DETAIL
 
-  * The count strip above the tabs always names the failure and warning
-    totals, so nothing that needs attention can hide behind an unopened
-    tab — you can see there is something to look at before you click.
-  * Tabs are client-side, so switching between them never re-runs the
-    script and never recomputes a QA pass.
-  * "Issues" comes first and is the tab you land on, because failures are
-    the only rows anyone has to act on.
-  * "↗ Expand" still opens the COMPLETE table in a modal for reading a
-    long run without scrolling the page.
+Each row carries its own Pass / Warn / Fail colour, so a reviewer reads
+one table top to bottom instead of switching between Issues / Warnings /
+Passed tabs. There is no "Expand" popup: the table is already shown in
+full on the page. (The popup was also where the app crashed — closing it
+with the X or Esc left it flagged open, so the next Expand tried to open
+a second dialog in the same run, which Streamlit refuses.)
 
 Rendering uses plain HTML tables rather than st.dataframe because a
 dataframe truncates long detail text to a single clipped line and adds
@@ -66,7 +62,7 @@ _HEADERS = {
     "expected": "Expected",
     "found": "Found",
     "category": "Category",
-    "module": "Module",
+    "module": "Check",
     "passed": "Passed",
     "warnings": "Warnings",
     "failed": "Failed",
@@ -152,7 +148,7 @@ def _first_filled(row, columns) -> str:
 def render_single_check(row, status_col: str) -> None:
     """A section holding exactly ONE check, rendered on one line.
 
-    Four KPI tiles, a chip strip, four tabs and a table, all to say "1 of 1
+    Four KPI tiles, a heading and a one-row table, all to say "1 of 1
     passed", is most of a screen spent on a single sentence — and a report
     with several such sections becomes mostly furniture. The verdict, what
     was checked and why are the entire content, so that is the entire row.
@@ -186,35 +182,16 @@ def _empty(message: str, tone: str = "plain") -> None:
     )
 
 
-def _count_strip(n_fail: int, n_warn: int, n_pass: int, n_total: int) -> None:
-    """The always-visible summary above the tabs.
-
-    This is the reason a tabbed table does not hide anything: whichever
-    tab is open, the failure and warning totals are on screen.
-    """
-    bits = []
-    if n_fail:
-        bits.append(_theme.chip(f"{n_fail} issue" + ("s" if n_fail != 1 else ""), "bad", "x-circle"))
-    if n_warn:
-        bits.append(_theme.chip(f"{n_warn} warning" + ("s" if n_warn != 1 else ""), "warn", "alert-triangle"))
-    if n_pass:
-        bits.append(_theme.chip(f"{n_pass} passed", "ok", "check-circle"))
-    if not n_fail and not n_warn and n_total:
-        bits.insert(0, _theme.chip("All checks passed", "ok", "shield"))
-    bits.append(_theme.chip(f"{n_total} checks total", "ghost", "doc-stack"))
-    st.markdown(
-        f'<div class="dq-kv" style="margin:.1rem 0 .55rem 0">{"".join(bits)}</div>',
-        unsafe_allow_html=True,
-    )
-
-
 def render_qa_table(
     df: pd.DataFrame,
     status_col: str,
     table_key: str,
     pass_label: str = "Passed",
 ) -> None:
-    """The single shared QA table renderer — see the module docstring."""
+    """The single shared QA table renderer — see the module docstring.
+
+    `table_key` and `pass_label` are accepted for the callers' sake; the
+    table has no widgets of its own any more, so neither is used."""
     if df is None or not len(df):
         _empty("No checks were produced for this section.")
         return
@@ -230,83 +207,11 @@ def render_qa_table(
         render_single_check(df.iloc[0], status_col)
         return
 
-    classes = df[status_col].apply(_status_class)
-    fail_df = df[classes == "fail"]
-    warn_df = df[classes == "warn"]
-    pass_df = df[classes == "pass"]
-    other_df = df[classes == ""]
-    # Rows with a status word the vocabulary does not know are shown with
-    # the issues, never dropped: an unrecognised status is exactly the
-    # kind of thing a reviewer must see rather than have filtered away.
-    if len(other_df):
-        fail_df = pd.concat([fail_df, other_df], ignore_index=True)
-
-    n_fail, n_warn, n_pass, n_total = len(fail_df), len(warn_df), len(pass_df), len(df)
-
-    # One header row: the always-visible counts on the left, the table's
-    # own action on the right — the same shape as the reference design's
-    # result header.
-    _counts_col, btn = st.columns([6, 1])
-    with _counts_col:
-        _count_strip(n_fail, n_warn, n_pass, n_total)
-    with btn:
-        expand_clicked = st.button(
-            "↗ Expand", key=f"{table_key}__expand", use_container_width=True,
-            help="Open every row of this table in a full-screen popup.",
-        )
-    if expand_clicked:
-        st.session_state[f"{table_key}__dialog_open"] = True
-    if st.session_state.get(f"{table_key}__dialog_open"):
-        _open_dialog(df, status_col, table_key)
-
-    tabs = st.tabs([
-        f"Issues ({n_fail})",
-        f"Warnings ({n_warn})",
-        f"{pass_label} ({n_pass})",
-        f"All records ({n_total})",
-    ])
-
-    with tabs[0]:
-        if n_fail:
-            _render_table(fail_df, status_col)
-        else:
-            _empty("Nothing needs attention here — no check failed.", tone="ok")
-    with tabs[1]:
-        if n_warn:
-            _render_table(warn_df, status_col)
-        else:
-            _empty("No warnings were raised for this section.")
-    with tabs[2]:
-        if n_pass:
-            _render_table(pass_df, status_col)
-        else:
-            _empty("No rows passed in this section yet.")
-    with tabs[3]:
-        _render_table(df, status_col)
-
-
-def _open_dialog(df: pd.DataFrame, status_col: str, table_key: str) -> None:
-    """st.dialog needs a decorated function; it arrived in Streamlit 1.31,
-    which is this app's documented minimum. On anything older the full
-    table is rendered inline instead of in a modal, so the button still
-    does something useful rather than raising."""
-    dialog_fn = getattr(st, "dialog", None)
-    if dialog_fn is None:
-        st.markdown("**Full table**")
-        _render_table(df, status_col)
-        if st.button("Close", key=f"{table_key}__dialog_close_inline"):
-            st.session_state[f"{table_key}__dialog_open"] = False
-            st.rerun()
-        return
-
-    @dialog_fn("Full QA table", width="large")
-    def _show():
-        _render_table(df, status_col)
-        if st.button("Close", key=f"{table_key}__dialog_close", type="primary"):
-            st.session_state[f"{table_key}__dialog_open"] = False
-            st.rerun()
-
-    _show()
+    st.markdown(
+        f'<div class="oq-records">All records ({len(df)})</div>',
+        unsafe_allow_html=True,
+    )
+    _render_table(df, status_col)
 
 
 def render_stat_row(passed: int, warnings: int, failed: int, total: Optional[int] = None,
@@ -380,7 +285,7 @@ def render_summary(results: Sequence[ModuleResult], table_key: str) -> None:
     """One row per module: its overall verdict plus Pass/Warn/Fail counts."""
     results = [r for r in (results or []) if r is not None]
     if not results:
-        _empty("No Advanced QA modules produced results for this email.")
+        _empty("No Advanced QA checks produced results for this email.")
         return
 
     rows = []
@@ -410,7 +315,7 @@ def render_summary(results: Sequence[ModuleResult], table_key: str) -> None:
     # that could not run at all reports a Warn verdict and zero items.
     render_stat_row(
         passed=mod_pass, warnings=mod_warn, failed=mod_fail,
-        total=len(results), total_label="Modules run",
+        total=len(results), total_label="Checks run",
     )
 
     render_qa_table(

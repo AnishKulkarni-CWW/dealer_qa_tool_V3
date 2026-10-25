@@ -101,20 +101,24 @@ def run_dealer_name_validation(
     """
     result = ModuleResult(module_name="Dealer Name Validation")
 
+    if not check_in_banner and not check_in_body:
+        result.notes.append("'Dealer exists in Banner' is not ticked, so this check was skipped.")
+        return result
+
     if not dealer_name:
-        result.notes.append("No dealer name available to validate (no dealer selected/entered).")
+        result.notes.append("No dealer name was available to look for.")
         return result
 
     if check_in_banner:
         if banner_ocr_text is None:
             result.add("Dealer Name", "Dealer in Banner", FAIL,
-                        detail="Banner OCR text not available — cannot validate dealer name in banner.")
+                        detail="The banner text could not be read, so the dealer name on it was not checked.")
         else:
             ok = validate_dealer_in_text(dealer_name, banner_ocr_text)
             result.add(
                 "Dealer Name", "Dealer in Banner",
                 PASS if ok else FAIL,
-                detail=f"Dealer '{dealer_name}' {'found' if ok else 'NOT found'} in banner OCR text.",
+                detail=f"Dealer '{dealer_name}' {'found' if ok else 'NOT found'} on the banner.",
                 expected=dealer_name,
                 found=banner_ocr_text[:200],
             )
@@ -122,7 +126,7 @@ def run_dealer_name_validation(
     if check_in_body:
         if body_text is None:
             result.add("Dealer Name", "Dealer in Body", FAIL,
-                        detail="Body text not available — cannot validate dealer name in body.")
+                        detail="The body text could not be read, so the dealer name in it was not checked.")
         else:
             ok = validate_dealer_in_text(dealer_name, body_text)
             result.add(

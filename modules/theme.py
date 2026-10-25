@@ -1061,6 +1061,14 @@ div[data-baseweb="popover"] li[aria-selected="true"] {{ background:{BRAND_TINT} 
    11. Result tables  (class names kept from the previous theme so
        results_ui.py needs no change to its markup contract)
    ====================================================================== */
+/* The one heading every result table carries now that the Issues /
+   Warnings / Passed tabs are gone — drawn like the selected tab it
+   replaces, so the page still reads the same way. */
+.oq-records {{
+    font-size:.845rem; font-weight:750; color:{BRAND};
+    padding:.15rem .1rem .5rem .1rem; margin:.15rem 0 .6rem 0;
+    border-bottom:2.5px solid {BRAND}; display:inline-block;
+}}
 .oq-table-wrap {{
     border:1px solid {LINE}; border-radius:13px; overflow:hidden auto;
     background:{WHITE}; max-height:none;
@@ -1105,27 +1113,6 @@ table.oq-table tr.oq-pass:hover td {{ background:{OK_BG}; }}
 .oq-status.pass {{ color:{OK};   background:{OK_BG};   border-color:{OK_LINE}; }}
 .oq-status.warn {{ color:{WARN}; background:{WARN_BG}; border-color:{WARN_LINE}; }}
 .oq-status.fail {{ color:{BAD};  background:{BAD_BG};  border-color:{BAD_LINE}; }}
-
-/* What a run used — see theme.run_notes. Bordered and labelled so it reads
-   as a record of the run rather than as four stray captions. */
-.dq-runnotes {{
-    border:1px solid {BAND_EDGE}; border-radius:11px;
-    background:{NOTE_BG};
-    padding:.55rem .75rem; margin:.1rem 0 .7rem 0;
-    display:flex; flex-direction:column; gap:.3rem;
-}}
-.dq-runnote {{
-    display:flex; gap:.6rem; align-items:baseline;
-    font-size:.775rem; line-height:1.45;
-}}
-.dq-runnote-k {{
-    flex:none; min-width:11ch; color:{BRAND_DARK};
-    font-weight:700; letter-spacing:.01em;
-}}
-.dq-runnote-v {{ color:{INK_SOFT}; min-width:0; }}
-@media (max-width:820px) {{
-    .dq-runnote {{ flex-direction:column; gap:.05rem; }}
-}}
 
 /* A section with exactly one check: the verdict, what was checked and why,
    on one line. See results_ui.render_single_check for why. */
@@ -1553,32 +1540,6 @@ def banner(text_html: str, tone: str = "info", icon_name: str = "info") -> None:
     """A coloured inline message. `text_html` is inserted as-is, so callers
     that need <b>/<br> can pass them; escape anything user-supplied."""
     _md(f'<div class="dq-banner {tone}">{_icon(icon_name, 17)}<div>{text_html}</div></div>')
-
-
-def run_notes(notes: Sequence[Tuple[str, str]]) -> None:
-    """What a run actually used, as one labelled panel.
-
-    These four facts — which master was read, how it was cropped, which OCR
-    engine answered, which guideline each banner was read as — are the
-    first things anyone asks when a result looks wrong. They used to be
-    `st.caption` lines scattered down the card, small and grey and easy to
-    scroll straight past, and each one vanished entirely whenever its value
-    happened to be empty, so "no master was supplied" looked exactly like
-    "everything is fine". One panel, always present, every line accounted
-    for.
-    """
-    rows = [(label, text) for label, text in (notes or []) if str(text or "").strip()]
-    if not rows:
-        return
-    _md(
-        '<div class="dq-runnotes">'
-        + "".join(
-            f'<div class="dq-runnote"><span class="dq-runnote-k">{_esc(label)}</span>'
-            f'<span class="dq-runnote-v">{_esc(text)}</span></div>'
-            for label, text in rows
-        )
-        + "</div>"
-    )
 
 
 def section_title(title: str, subtitle: str = "", icon_name: str = "") -> None:

@@ -218,6 +218,40 @@ def _find_dealer_panel_website_line(panel_text: str) -> Optional[str]:
     return None
 
 
+def _find_dealer_panel_email(panel_text: str) -> Optional[str]:
+    """The address on the panel's 'Email:' line in the sheet, spaces removed
+    (a sheet typo like 'info @bmw-...' still names the same mailbox)."""
+    for line in (panel_text or "").splitlines():
+        m = re.match(r"\s*e-?mail\s*:?\s*(.+)$", line, re.IGNORECASE)
+        if m:
+            addr = re.sub(r"\s+", "", m.group(1)).strip().rstrip(".,;")
+            if "@" in addr:
+                return addr
+    return None
+
+
+def _panel_link(soup: BeautifulSoup, label_re: str, value: str) -> Tuple[bool, Optional[Tag]]:
+    """(line_found, link) for the panel's Website or Email line.
+
+    The line is found by its label ('Website:', 'Email:'), or — for a sheet
+    that writes a bare address with no label — by the address itself. The
+    link is the one the reader taps on that line. When the line is not in
+    the email at all, (False, None): Content QA already reports it missing.
+    """
+    for node in soup.find_all(string=re.compile(rf"^\s*{label_re}\s*:", re.IGNORECASE)):
+        parent = node.parent
+        if parent is None or parent.name in ("script", "style", "title"):
+            continue
+        return True, parent.find_next("a")
+    needle = (value or "").lower()
+    needle = re.sub(r"^(https?://)?(www\.)?", "", needle).rstrip("/")
+    if needle:
+        for a in soup.find_all("a"):
+            if needle in a.get_text(" ", strip=True).lower():
+                return True, a
+    return False, None
+
+
 def find_cta_button_href(html_raw: str) -> Optional[str]:
     """
     Locates the CTA button using the SAME detection rule already used by
@@ -323,13 +357,16 @@ def run_website_link_qa(
         rows.append({
             "item": "Website check (CTA Button): no CTA button found",
             "status": "Warn",
-            "detail": "No CTA-style button (linked, colored <td> wrapping a nested button table) was found in the HTML to check its link.",
+            "detail": "No CTA button was found in the email, so its link could not be checked.",
         })
     elif cta_domain is None:
+        # A placeholder ("#", "javascript:void(0)", an empty href) is a button
+        # that goes nowhere — it has to be fixed before the email is sent.
         rows.append({
-            "item": f"Website check (CTA Button): {cta_href}",
-            "status": "Warn",
-            "detail": f"CTA button href '{cta_href}' does not look like a valid website URL.",
+            "item": f"Website check (CTA Button): {cta_href or '(empty link)'}",
+            "status": "Fail",
+            "detail": (f"The CTA button links to '{cta_href}', which is not a website — "
+                       f"it must point to the dealer's site."),
         })
     else:
         ok, where = _dealer_name_in_url(cta_href, dealer_name)
@@ -396,5 +433,43 @@ def run_website_link_qa(
             "status": "Pass" if ok else "Fail",
             "detail": detail,
         })
+
+    # ---- Rows 4 and 5: where the panel's own Website and Email links go ----
+    # Rows 1-3 read the sheet's website and the CTA button. Neither looks at
+    # the link behind the panel's "Website:" / "Email:" lines, so a panel
+    # whose text is right but whose link goes to another dealer passed
+    # every check.
+    soup = BeautifulSoup(html_raw or "", "html.parser")
+    line_found, link = (_panel_link(soup, "website", panel_website_raw)
+                        if panel_domain is not None else (False, None))
+    if line_found:
+        href = (link.get("href") or "").strip() if link is not None else ""
+        link_domain = _extract_domain(href) if href else None
+        if link is None:
+            status, detail = "Fail", "The Website line in the email has no link."
+        elif link_domain == panel_domain:
+            status, detail = "Pass", f"The Website link goes to the sheet's website ('{href}')."
+        else:
+            status, detail = "Fail", (
+                f"The Website link goes to '{href or '(empty link)'}', "
+                f"not to the sheet's website '{panel_domain}'.")
+        rows.append({"item": f"Website link target: {panel_website_raw}",
+                     "status": status, "detail": detail})
+
+    panel_email = _find_dealer_panel_email(panel_text)
+    line_found, link = _panel_link(soup, "e-?mail", panel_email) if panel_email else (False, None)
+    if line_found:
+        href = (link.get("href") or "").strip() if link is not None else ""
+        link_addr = re.sub(r"^mailto:", "", href, flags=re.IGNORECASE).split("?")[0].strip()
+        if link is None:
+            status, detail = "Fail", "The Email line in the email has no link."
+        elif link_addr.lower() == panel_email.lower():
+            status, detail = "Pass", f"The Email link goes to the sheet's address ('{href}')."
+        else:
+            status, detail = "Fail", (
+                f"The Email link goes to '{href or '(empty link)'}', "
+                f"not to the sheet's address '{panel_email}'.")
+        rows.append({"item": f"Email link target: {panel_email}",
+                     "status": status, "detail": detail})
 
     return WebsiteLinkQAResult(rows=rows)

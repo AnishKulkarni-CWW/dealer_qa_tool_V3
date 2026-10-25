@@ -307,10 +307,9 @@ def describe_ocr_slips(slips: List[Tuple[str, str]]) -> str:
     pairs = ", ".join(f"'{found}' for '{expected}'" for expected, found in slips[:6])
     more = "" if len(slips) <= 6 else f" (and {len(slips) - 6} more)"
     return (
-        f"Hard to read: {pairs}{more}. Both sides of this check are OCR — the "
-        f"Master's artwork and this email's — so a difference shaped like this is "
-        f"far more often one word read two ways than two different words. Compare "
-        f"the two banners by eye."
+        f"Hard to read: {pairs}{more}. Both banners are read from images, so this "
+        f"is most likely the same word read two ways rather than a different word. "
+        f"Compare the two banners by eye."
     )
 
 
@@ -356,7 +355,7 @@ def _field_status(expected: str, found: str, config, match_case: bool = False,
     if matched_ratio >= config.ocr_token_match_min_ratio and not wd.missing:
         if slips:
             return WARN, describe_ocr_slips(slips)
-        return PASS, "All expected words found in banner OCR text."
+        return PASS, "All expected words found on the banner."
     parts = []
     if wd.missing:
         parts.append(f"Missing word(s): {', '.join(wd.missing)}")
@@ -364,7 +363,12 @@ def _field_status(expected: str, found: str, config, match_case: bool = False,
         parts.append(f"Unexpected/extra word(s) nearby: {', '.join(wd.extra[:10])}")
     if slips:
         parts.append(describe_ocr_slips(slips))
-    status = FAIL if matched_ratio < config.ocr_token_match_min_ratio else WARN
+    # Any word still missing after the hard-to-read slips were set aside is a
+    # real copy difference — "SHARE THE LUXURY AND JOY." against "SHARE THE
+    # PRIVILEGE AND JOY." is the wrong headline, however many of its other
+    # words agree — so it fails. (A partial match used to be only a Warning
+    # while 60% of the words matched.)
+    status = FAIL if wd.missing else WARN
     return status, "; ".join(parts) if parts else "Partial match."
 
 
@@ -498,7 +502,7 @@ def run_banner_text_qa(
 
     any_expected = any(v.strip() for v in (expected_headline, expected_subheadline, expected_dealer_name))
     if not any_expected:
-        result.notes.append("No headline/subheadline/dealer-name expected values provided — banner text QA skipped.")
+        result.notes.append("No Headline, Subheadline or Dealer Name was available to compare, so the banner text was not checked.")
         return result
 
     # Filter: the Dealer Name shouldn't be expected as part of the
@@ -517,9 +521,8 @@ def run_banner_text_qa(
         expected_headline = _strip_any_dealer_name(expected_headline, known_dealer_names)
         if expected_subheadline != _sub_before or expected_headline != _head_before:
             result.notes.append(
-                "A different dealer's name was found trailing the expected Headline/Subheadline "
-                "(the Master creative carries another dealer than this email) and was removed "
-                "before comparison — Dealer Name is checked on its own row instead."
+                "The master's Headline/Subheadline ended with a different dealer's name, so "
+                "that name was left out of the comparison — Dealer Name is checked on its own row."
             )
 
     headline_found = ""
@@ -615,28 +618,6 @@ def run_banner_text_qa(
         # the email body. `_dealer_field_status` handles the not-found case
         # explicitly and honestly instead.
 
-        note_parts = [
-            f"Banner lines matched to fields by content "
-            f"({len(assignment.headline_lines)} headline, "
-            f"{len(assignment.subheadline_lines)} subheadline, "
-            f"{1 if assignment.dealer_line is not None else 0} dealer-name line(s))"
-        ]
-        if used_band_fallback:
-            note_parts.append(
-                "fell back to OCR font-size band for: " + ", ".join(used_band_fallback)
-            )
-        if used_blob_fallback:
-            note_parts.append(
-                "fell back to whole-banner OCR text for: " + ", ".join(used_blob_fallback)
-            )
-        if assignment.unmatched_lines:
-            unmatched_preview = "; ".join(l.text for l in assignment.unmatched_lines[:5])
-            note_parts.append(
-                f"{len(assignment.unmatched_lines)} banner line(s) matched no expected "
-                f"field and were not attributed to one: {unmatched_preview}"
-            )
-        match_method_note = ". ".join(note_parts) + "."
-        result.notes.append(match_method_note)
     else:
         # Back-compat path: no clustered data supplied, compare all three
         # against the full blob as before.
@@ -652,10 +633,9 @@ def run_banner_text_qa(
             and not expected_headline.strip()
             and not expected_subheadline.strip()):
         result.notes.append(
-            "No expected Headline or Subheadline was available from the Master, so those "
-            "rows were skipped rather than checked. Confirm the Master banner was cropped "
-            "correctly (the crop stops at the 'Dear' salutation) and that its text is "
-            "legible — the banner text on this email was read fine."
+            "No Headline or Subheadline could be read from the master, so those rows were "
+            "skipped. Check that the master is the full approved email and that its banner "
+            "text is clear — this email's banner text was read fine."
         )
 
     fields = [
@@ -665,7 +645,7 @@ def run_banner_text_qa(
     ]
 
     if match_case:
-        result.notes.append("Case-sensitive matching enabled — casing differences (e.g. \"motors\" vs \"Motors\") count as a mismatch.")
+        result.notes.append("Capital letters count: \"motors\" and \"Motors\" are treated as different words.")
 
     for label, expected, found_text in fields:
         if label == "Dealer Name":

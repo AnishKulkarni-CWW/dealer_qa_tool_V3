@@ -284,14 +284,12 @@ def extract_models(zip_source, source_name: str = "") -> Tuple[List[BundledModel
     if len(models) == 1:
         note = f"'{source_name}' holds one email."
     else:
-        depth = max(m.folder.count("/") for m in models) + 1
         note = (
-            f"'{source_name}' holds {len(models)} model folders "
-            f"({depth} level(s) deep): " + ", ".join(
+            f"'{source_name}' holds {len(models)} emails: " + ", ".join(
                 posixpath.basename(m.folder) or "(root)" for m in models
             )
         )
     n_masters = sum(len(m.master_images) for m in models)
     if n_masters:
-        note += f" — {n_masters} master creative(s) found beside the HTML."
+        note += f" — with {n_masters} master image(s) beside them."
     return models, note

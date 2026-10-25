@@ -18,7 +18,7 @@ def run_body_dealer_qa(has_dealer_in_body_enabled: bool, dealer_name: str, body_
     """Feature 12 — purely opt-in; skipped entirely if the toggle is off."""
     result = ModuleResult(module_name="Body QA — Dealer Name")
     if not has_dealer_in_body_enabled:
-        result.notes.append("'Has Dealer Name in Body' check is disabled — skipped.")
+        result.notes.append("'Dealer exists in Body' is not ticked, so this check was skipped.")
         return result
     if not dealer_name:
         result.add("Body", "Dealer Name in Body", FAIL, detail="No dealer name available to check.")
@@ -94,7 +94,7 @@ def run_manual_body_comparison(as_is: str, to_be: str, html_body_text: str) -> M
     result = ModuleResult(module_name="Manual Body Comparison")
 
     if not to_be.strip():
-        result.notes.append("No 'To Be' text provided — manual body comparison skipped.")
+        result.notes.append("No 'To Be' text was entered, so the body was not compared.")
         return result
 
     ops_vs_html = diff_as_is_to_be(to_be, html_body_text or "")

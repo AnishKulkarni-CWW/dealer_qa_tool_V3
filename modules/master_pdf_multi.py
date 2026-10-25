@@ -310,8 +310,8 @@ def index_emailer_pages(pdf_source) -> EmailerIndex:
         import fitz  # PyMuPDF
     except ImportError:
         return EmailerIndex(note=(
-            "Multi-emailer detection needs the 'pymupdf' package. "
-            "Run: pip install pymupdf"
+            "PDF pages cannot be read on this computer, so emailer pages were not "
+            "matched to models."
         ))
 
     if hasattr(pdf_source, "getvalue"):
@@ -324,7 +324,7 @@ def index_emailer_pages(pdf_source) -> EmailerIndex:
     try:
         doc = fitz.open(stream=data, filetype="pdf")
     except Exception as e:
-        return EmailerIndex(note=f"Could not open the master PDF: {e}")
+        return EmailerIndex(note="The master PDF could not be opened.")
 
     entries: List[EmailerEntry] = []
     current_label = ""
