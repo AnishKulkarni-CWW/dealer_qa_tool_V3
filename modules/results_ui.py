@@ -15,8 +15,9 @@ section's count tiles:
     All records (24)
       #  ITEM                STATUS   DETAIL
 
-Each row carries its own Pass / Warn / Fail colour, so a reviewer reads
-one table top to bottom instead of switching between Issues / Warnings /
+Each row carries its own Pass / Warn / Fail colour, and the rows run
+Fail first, then Warn, then Pass, so what needs fixing is at the top of
+one table read top to bottom — no switching between Issues / Warnings /
 Passed tabs. There is no "Expand" popup: the table is already shown in
 full on the page. (The popup was also where the app crashed — closing it
 with the X or Esc left it flagged open, so the next Expand tried to open
@@ -82,6 +83,22 @@ def _status_class(value: object) -> str:
 
 def _is_attention(value: object) -> bool:
     return _status_class(value) in ("warn", "fail")
+
+
+# Fail first, then Warn, then Pass. A status the vocabulary does not know
+# sorts with the failures: it is exactly what a reviewer must not miss.
+_ATTENTION_ORDER = {"fail": 0, "": 0, "warn": 1, "pass": 2}
+
+
+def _attention_first(df: pd.DataFrame, status_col: str) -> pd.DataFrame:
+    """The rows that need action at the top. The sort is stable, so within
+    each status the rows keep the order the check produced them in."""
+    if status_col not in df.columns:
+        return df
+    rank = df[status_col].apply(lambda v: _ATTENTION_ORDER[_status_class(v)])
+    return (df.assign(_attention_rank=rank)
+              .sort_values("_attention_rank", kind="stable")
+              .drop(columns="_attention_rank"))
 
 
 def _cell(value: object) -> str:
@@ -211,7 +228,7 @@ def render_qa_table(
         f'<div class="oq-records">All records ({len(df)})</div>',
         unsafe_allow_html=True,
     )
-    _render_table(df, status_col)
+    _render_table(_attention_first(df, status_col), status_col)
 
 
 def render_stat_row(passed: int, warnings: int, failed: int, total: Optional[int] = None,

@@ -1889,7 +1889,33 @@ def _punctuation_offences_in_token(word: str):
     return offences
 
 
-def run_punctuation_spacing_qa(html_raw: str, config) -> List[StyleIssue]:
+def _dealer_panel_line_span(rendered_lines: List[str], panel_lines: List[str]) -> Optional[Tuple[int, int]]:
+    """First and last rendered line of the dealer panel, located by the
+    sheet's own panel lines.
+
+    Each sheet line is matched to the email's lines; the panel is the
+    largest run of matches lying close together. Taking the run rather than
+    simply the first and last match keeps a stray match elsewhere — body
+    copy that names the dealer — from stretching the "panel" over the body.
+    Returns None when fewer than two sheet lines can be found.
+    """
+    hits = sorted({m[0] for m in (find_best_match(rendered_lines, pl) for pl in panel_lines or []) if m})
+    if len(hits) < 2:
+        return None
+    groups, current = [], [hits[0]]
+    for h in hits[1:]:
+        if h - current[-1] <= 4:
+            current.append(h)
+        else:
+            groups.append(current)
+            current = [h]
+    groups.append(current)
+    best = max(groups, key=len)
+    return (best[0], best[-1]) if len(best) >= 2 else None
+
+
+def run_punctuation_spacing_qa(html_raw: str, config,
+                               panel_lines: Optional[List[str]] = None) -> List[StyleIssue]:
     """
     Flags a comma or full stop that is immediately followed by the next
     word with no space, the normal English-usage rule being that a space
@@ -1909,46 +1935,69 @@ def run_punctuation_spacing_qa(html_raw: str, config) -> List[StyleIssue]:
     campaign emails with zero false positives, while still correctly
     catching genuine spacing gaps like "Plot No.50" (should be "Plot
     No. 50") and "Gate no.3" (should be "Gate no. 3").
+
+    THE DEALER PANEL FOLLOWS THE SHEET
+    The panel's text comes from the dealer sheet, not from the copywriter,
+    so it is judged against the sheet (`panel_lines`) rather than against
+    the general rule:
+      * a missing space the sheet itself has ("Sy No.27/-16Pa4") is the
+        dealer's own address as written — not flagged;
+      * a missing space the sheet does NOT have is a Warn, not a Fail —
+        the line's exact-match row in Content QA already reports it too.
+    Everything outside the panel — body copy, offer text, disclaimer —
+    still fails on a missing space exactly as before.
     """
     issues: List[StyleIssue] = []
     soup = BeautifulSoup(html_raw, "html.parser")
-    rendered = html_to_rendered_text(soup)
+    rendered_lines = html_to_rendered_text(soup).splitlines()
 
-    found: List[tuple] = []
+    panel_span = _dealer_panel_line_span(rendered_lines, panel_lines or [])
+    sheet_tokens = {tok for pl in (panel_lines or []) for tok in pl.split()}
 
-    for line in rendered.splitlines():
+    # token -> (severity, punct, before, after); a token met both in the
+    # body (Fail) and in the panel keeps the stronger verdict.
+    verdicts: Dict[str, tuple] = {}
+    as_per_sheet = 0
+    for idx, line in enumerate(rendered_lines):
+        in_panel = panel_span is not None and panel_span[0] <= idx <= panel_span[1]
         for word_match in re.finditer(r"\S+", line):
             word = word_match.group()
             if _looks_like_domain_or_email_token(word) or _looks_like_numeric_identifier_token(word):
                 continue
             for punct, before_char, after_char in _punctuation_offences_in_token(word):
-                found.append((word, punct, before_char, after_char))
+                if in_panel and word in sheet_tokens:
+                    as_per_sheet += 1
+                    continue
+                severity = "Warn" if in_panel else "Fail"
+                if word not in verdicts or (severity == "Fail" and verdicts[word][0] == "Warn"):
+                    verdicts[word] = (severity, punct, before_char, after_char, in_panel)
 
-    # De-duplicate on the token so the same typo repeated verbatim
-    # elsewhere in the email doesn't spam the table.
-    seen = set()
-    unique_found = []
-    for entry in found:
-        if entry[0] not in seen:
-            seen.add(entry[0])
-            unique_found.append(entry)
-
-    if unique_found:
-        for word, punct, before_char, after_char in unique_found[:15]:
-            punct_name = "comma" if punct == "," else "full stop"
-            issues.append(StyleIssue(
-                f"Punctuation spacing: '{word}'", "Fail",
-                f"'{word}' - the {punct_name} after '{before_char}' runs straight "
-                f"into '{after_char}'; a comma or full stop should be followed by "
-                f"a space before the next word.",
-            ))
-        if len(unique_found) > 15:
-            issues.append(StyleIssue(
-                "Punctuation spacing", "Fail",
-                f"...and {len(unique_found) - 15} more occurrence(s) not shown.",
-            ))
-    else:
-        issues.append(StyleIssue("Punctuation spacing", "Pass", "Every comma and full stop found is correctly followed by a space."))
+    shown = list(verdicts.items())[:15]
+    for word, (severity, punct, before_char, after_char, in_panel) in shown:
+        punct_name = "comma" if punct == "," else "full stop"
+        if severity == "Warn":
+            detail = (f"'{word}' in the dealer panel - the {punct_name} after '{before_char}' "
+                      f"runs straight into '{after_char}', and the dealer sheet does not write "
+                      f"it that way. Check it against the sheet.")
+        else:
+            detail = (f"'{word}' - the {punct_name} after '{before_char}' runs straight "
+                      f"into '{after_char}'; a comma or full stop should be followed by "
+                      f"a space before the next word.")
+        issues.append(StyleIssue(f"Punctuation spacing: '{word}'", severity, detail))
+    hidden = list(verdicts.values())[15:]
+    if hidden:
+        issues.append(StyleIssue(
+            "Punctuation spacing",
+            "Fail" if any(v[0] == "Fail" for v in hidden) else "Warn",
+            f"...and {len(hidden)} more occurrence(s) not shown.",
+        ))
+    if not verdicts:
+        issues.append(StyleIssue(
+            "Punctuation spacing", "Pass",
+            "Every comma and full stop found is correctly followed by a space."
+            + (" Dealer-panel text written exactly as in the dealer sheet is left as the sheet has it."
+               if as_per_sheet else ""),
+        ))
 
     return issues
 
@@ -3076,7 +3125,7 @@ with ext_theme.hidden(not ext_workflow_visible):
                 ):
                     style_issues = run_style_qa(job["html"])
                     double_space_issues = run_double_space_qa(job["html"], EXT_CFG)
-                    punctuation_issues = run_punctuation_spacing_qa(job["html"], EXT_CFG)
+                    punctuation_issues = run_punctuation_spacing_qa(job["html"], EXT_CFG, panel_lines)
                     bold_issues = check_bold_required_lines(job["html"], dealer_row, EXT_CFG)
                     image_issues = run_image_size_qa(job["html"], job["images"])
                     all_issues = style_issues + double_space_issues + punctuation_issues + bold_issues + image_issues
